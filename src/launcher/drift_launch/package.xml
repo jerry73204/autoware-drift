@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>drift_launch</name>
+  <version>0.1.0</version>
+  <description>autoware-drift's launch: the drift controller in swb's Isaac ego stack, Autoware's settings for a car that takes bends at speed, and the Town05 ring scenario</description>
+  <maintainer email="jerry73204@gmail.com">aeon</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>drift_controller</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

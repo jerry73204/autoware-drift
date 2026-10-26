@@ -161,10 +161,12 @@ class DriftController:
         if ph is Phase.CRUISE:
             if self.points and (self.p.repeat or self.next_index < len(self.points)):
                 w = self.points[self.next_index % len(self.points)]
-                if (math.hypot(w.x - s.x, w.y - s.y) < p.trigger_distance
-                        and s.speed >= p.min_entry_speed):
-                    self.active = w
+                if math.hypot(w.x - s.x, w.y - s.y) < p.trigger_distance:
                     self.next_index += 1
+                    if s.speed < p.min_entry_speed:  # too slow to drift: the next bend's turn
+                        self.log.append(("skipped", f"{w.name} at {s.speed:.1f} m/s"))
+                        return Command(0.0, 0.0, False)
+                    self.active = w
                     self._go(Phase.BRAKE, s, w.name)
                     return self.step(s, 0.0)
             return Command(0.0, 0.0, False)

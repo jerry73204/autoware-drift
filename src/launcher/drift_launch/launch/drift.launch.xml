@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!--
+  What autoware-drift adds to swb's Isaac ego stack (swb roadmap 057), included by
+  `just ego-isaac ... extra_launch:=<this file>`: drift_controller between Autoware's command
+  gate and the car. The rest is arguments of the ego stack (see the README): the car
+  (vehicle_model:=drift_mustang sensor_model:=drift_mustang_sensor_kit), max_velocity:=27.78,
+  velocity_smoother_param_path:=$(find-pkg-share drift_launch)/config/velocity_smoother.param.yaml.
+-->
+<launch>
+  <arg name="drift_points" default="$(find-pkg-share drift_controller)/config/town05_ring.yaml"/>
+  <arg name="drift_repeat" default="true"/>
+  <arg name="drift_params" default=""/>
+  <include file="$(find-pkg-share drift_controller)/launch/drift_controller.launch.xml">
+    <arg name="points_file" value="$(var drift_points)"/>
+    <arg name="repeat" value="$(var drift_repeat)"/>
+    <arg name="params" value="$(var drift_params)"/>
+  </include>
+</launch>

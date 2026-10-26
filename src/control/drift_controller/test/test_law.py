@@ -74,3 +74,11 @@ def test_repeat_takes_the_points_again():
         ctl.phase, ctl.active = Phase.CRUISE, None   # as after a handed-back drift
         ctl.step(far, 0.01)
     assert ctl.next_index == 3
+
+
+def test_a_bend_reached_too_slowly_is_skipped_and_the_next_still_drifts():
+    ctl = DriftController([DriftPoint(10.0, 0.0, 100.0, "a"), DriftPoint(200.0, 0.0, 100.0, "b")])
+    ctl.step(State(10.0, 0.0, 0.0, 10.0, 0.0, 0.0), 0.01)
+    assert ctl.phase is Phase.CRUISE and ctl.log[-1][0] == "skipped"
+    ctl.step(State(200.0, 0.0, 0.0, 27.8, 0.0, 0.0), 0.01)
+    assert ctl.phase is Phase.BRAKE and ctl.active.name == "b"
