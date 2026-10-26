@@ -40,7 +40,8 @@ just ego-isaac overlay:=$D/install/setup.bash map_path:=$CARLA_MAPS/Town05 \
     vehicle_model:=drift_mustang sensor_model:=drift_mustang_sensor_kit max_velocity:=27.78 \
     velocity_smoother_param_path:=$D/install/drift_launch/share/drift_launch/config/velocity_smoother.param.yaml \
     extra_launch:=$D/install/drift_launch/share/drift_launch/launch/drift.launch.xml
-just scenario $D/install/drift_launch/share/drift_launch/scenarios/town05_ring_lap.xosc sim:=isaac
+just scenario $D/install/drift_launch/share/drift_launch/scenarios/town05_ring_lap.xosc sim:=isaac \
+    vehicle_model:=drift_mustang frame_rate:=100   # a 10 ms step (swb 7b5a18a)
 ```
 
 `/drift/state` reports each drift (bend, phase, speed, sideslip, yaw rate); the vehicle takes
