@@ -31,7 +31,8 @@ moment to the left. Too much sideslip into the turn (beta below beta* in a left 
 calls for less turn-in, too much yaw rate likewise. Drive torque sets the rear axle's slip,
 which takes lateral grip from the rear: more drive, more sideslip.
 
-    accel = accel_hold + k_drive (|beta*| - |beta|) + integral, kept within the limits
+    accel = accel_hold + k_drive (|beta*| - |beta|) + integral - k_speed (v - v_hold)+,
+    kept within the limits (v_hold: the speed the hold began at)
 
 (Goh, Goel & Gerdes 2019 control rear wheel speed instead; a vehicle bridge that publishes
 it can replace the drive law with that.)
@@ -80,6 +81,7 @@ class Params:
     accel_hold: float = 0.0             # m/s^2: drive past the drag spins the rear and widens the line
     k_drive: float = 20.0               # m/s^2 per rad
     k_drive_i: float = 10.0             # m/s^2 per rad s
+    k_speed: float = 1.5                # m/s^2 per m/s over the speed the hold began at
     accel_min: float = -3.0
     accel_max: float = 9.0
     exit_time: float = 1.0              # s
@@ -127,13 +129,14 @@ class DriftController:
     yaw0: float = 0.0
     integral: float = 0.0
     exit_beta0: float = 0.0
+    hold_speed: float = 0.0
     log: list = field(default_factory=list)
 
     def _go(self, phase, s, why=""):
         self.log.append((phase.value, why))
         self.phase, self.t_phase = phase, 0.0
         if phase is Phase.HOLD:
-            self.yaw0, self.integral = s.yaw, 0.0
+            self.yaw0, self.integral, self.hold_speed = s.yaw, 0.0, s.speed
         if phase is Phase.EXIT:
             self.exit_beta0 = s.beta
 
@@ -187,7 +190,10 @@ class DriftController:
             beta_ref = -sign * p.target_sideslip
             err = p.target_sideslip - abs(s.beta)
             self.integral = max(-0.3, min(0.3, self.integral + err * dt))
-            accel = p.accel_hold + p.k_drive * err + p.k_drive_i * self.integral
+            # drive holds the sideslip; past the speed the hold began at it is taken back, or a
+            # power-on drift gains speed and widens its line
+            accel = (p.accel_hold + p.k_drive * err + p.k_drive_i * self.integral
+                     - p.k_speed * max(0.0, s.speed - self.hold_speed))
             return Command(self._hold_steer(s, beta_ref, r_ref),
                            max(p.accel_min, min(p.accel_max, accel)), True)
         if ph is Phase.EXIT:
