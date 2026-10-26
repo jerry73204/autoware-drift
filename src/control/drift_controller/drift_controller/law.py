@@ -75,9 +75,9 @@ class Params:
     target_sideslip: float = math.radians(20)   # magnitude; its sign follows the turn
     hold_time: float = 6.0              # s
     hold_angle: float = math.radians(170)        # heading change in the drift
-    k_beta: float = 0.6
-    k_r: float = 0.25                   # rad per rad/s
-    accel_hold: float = 4.0             # m/s^2
+    k_beta: float = 1.5
+    k_r: float = 1.0                    # rad per rad/s
+    accel_hold: float = 0.0             # m/s^2: drive past the drag spins the rear and widens the line
     k_drive: float = 20.0               # m/s^2 per rad
     k_drive_i: float = 10.0             # m/s^2 per rad s
     accel_min: float = -3.0

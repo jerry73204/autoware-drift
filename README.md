@@ -1,7 +1,7 @@
 # autoware-drift
 
 An Autoware 1.5.0 project for one experiment: a fast rear-wheel-drive car that Autoware
-drives around a closed CARLA highway at 100 km/h, and that drifts through every turn. A
+drives around CARLA Town05's closed ring highway (1.5 km, bends of ~100 m) at 100 km/h, and that drifts through every turn. A
 drift controller takes the car at each turn's waypoint (trail-brake, power-over, a held
 sideslip, exit) and hands it back to Autoware for the next straight. The car runs in NVIDIA
 Isaac Sim through [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario-world-bridge)
@@ -9,7 +9,7 @@ Isaac Sim through [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario
 swb's roadmap 057.
 
 **Status**: started 2026-10-27. The drift controller exists and is tested offline against a
-single-track model; the car, the launch and the Isaac runs are to come.
+single-track model (on a 100 m bend: -18 deg sideslip held on a 103 m radius at 103 km/h); the car, the launch and the Isaac runs are to come.
 
 ## Layout
 
