@@ -58,6 +58,7 @@ class DriftPoint:
     y: float
     radius: float           # m, > 0 left turn, < 0 right turn
     name: str = ""
+    angle: float = 0.0      # rad, the bend's turn; the hold ends short of it (0: Params.hold_angle)
 
 
 @dataclass
@@ -75,7 +76,8 @@ class Params:
     enter_sideslip: float = math.radians(10)
     target_sideslip: float = math.radians(20)   # magnitude; its sign follows the turn
     hold_time: float = 6.0              # s
-    hold_angle: float = math.radians(170)        # heading change in the drift
+    hold_angle: float = math.radians(170)        # heading change in the drift, unless the point gives its bend
+    exit_lead: float = math.radians(20)          # a bend's hold ends this short of its turn, for the exit
     k_beta: float = 1.5
     k_r: float = 1.0                    # rad per rad/s
     accel_hold: float = 0.0             # m/s^2: drive past the drag spins the rear and widens the line
@@ -184,7 +186,8 @@ class DriftController:
         r_ref = s.speed / self.active.radius
         if ph is Phase.HOLD:
             turned = abs(math.remainder(s.yaw - self.yaw0, math.tau))
-            if self.t_phase >= p.hold_time or turned >= p.hold_angle:
+            limit = (self.active.angle - p.exit_lead) if self.active.angle else p.hold_angle
+            if self.t_phase >= p.hold_time or turned >= limit:
                 self._go(Phase.EXIT, s, f"held {self.t_phase:.1f} s, {math.degrees(turned):.0f} deg")
                 return self.step(s, 0.0)
             beta_ref = -sign * p.target_sideslip

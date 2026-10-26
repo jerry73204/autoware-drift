@@ -42,3 +42,23 @@ def test_a_right_bend_mirrors_it():
     ctl, trace = run(-74.0)
     held = [b for t, p, b, _ in trace if p is Phase.HOLD]
     assert held and all(b > 0 for b in held[len(held) // 3:])
+
+
+def test_a_90_degree_bend_ends_its_hold_short_of_the_turn():
+    sim = Sim(vx=27.8)
+    ctl = DriftController([DriftPoint(60.0, 0.0, 104.0, "bend", math.radians(90))])
+    dt, t, next_ctl, cmd, yaw_at = 0.001, 0.0, 0.0, None, {}
+    while t < 16.0:
+        if t >= next_ctl:
+            s = State(sim.x, sim.y, sim.yaw, sim.vx, sim.vy, sim.r)
+            cmd = ctl.step(s, 0.01)
+            if not cmd.override:
+                cmd.steer = s.beta + 1.35 * s.r / max(s.speed, 1.0)
+                cmd.accel = 27.8 - s.speed
+            yaw_at.setdefault(ctl.phase, s.yaw)
+            next_ctl += 0.01
+        sim.step(cmd.steer, cmd.accel, dt)
+        t += dt
+    assert [p for p, _ in ctl.log] == ["brake", "turn_in", "hold", "exit", "cruise"], ctl.log
+    held = math.degrees(yaw_at[Phase.EXIT] - yaw_at[Phase.HOLD])
+    assert 55 < held < 75, held   # 90 deg less the exit's 20, from where the hold began
