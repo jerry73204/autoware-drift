@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!--
+  drift_controller between Autoware's command gate and the car (swb roadmap 057). Included
+  in the ego stack by swb's `just ego-isaac ... extra_launch:=<this file>`; the vehicle takes
+  its Control from /control/command/drift/control_cmd (aib's ego_drift_mustang.yaml).
+-->
+<launch>
+  <arg name="points_file" default="$(find-pkg-share drift_controller)/config/town05_ring.yaml"
+       description="the drift points: one per bend, map frame"/>
+  <arg name="repeat" default="true" description="true: the points again after the last (laps)"/>
+  <arg name="rate_hz" default="100.0"/>
+  <arg name="params" default="" description="JSON: law.Params overrides by name; empty: none"/>
+  <node pkg="drift_controller" exec="drift_controller" name="drift_controller" output="screen">
+    <param name="use_sim_time" value="true"/>
+    <param name="points_file" value="$(var points_file)"/>
+    <param name="rate_hz" value="$(var rate_hz)"/>
+    <param name="repeat" value="$(var repeat)"/>
+    <param name="params" value="$(var params)"/>
+  </node>
+</launch>

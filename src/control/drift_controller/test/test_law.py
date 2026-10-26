@@ -1,7 +1,7 @@
 """The drift sequence against the single-track model: a left bend entered at 100 km/h."""
 import math
 
-from drift_controller.law import DriftController, DriftPoint, Phase, State
+from drift_controller.law import DriftController, DriftPoint, Params, Phase, State
 from drift_controller.model import Sim
 
 
@@ -62,3 +62,15 @@ def test_a_90_degree_bend_ends_its_hold_short_of_the_turn():
     assert [p for p, _ in ctl.log] == ["brake", "turn_in", "hold", "exit", "cruise"], ctl.log
     held = math.degrees(yaw_at[Phase.EXIT] - yaw_at[Phase.HOLD])
     assert 55 < held < 75, held   # 90 deg less the exit's 20, from where the hold began
+
+
+def test_repeat_takes_the_points_again():
+    ctl = DriftController([DriftPoint(10.0, 0.0, 100.0)], Params(repeat=True))
+    far = State(500.0, 500.0, 0.0, 27.8, 0.0, 0.0)
+    near = State(10.0, 0.0, 0.0, 27.8, 0.0, 0.0)
+    for lap in range(3):
+        ctl.step(near, 0.01)
+        assert ctl.phase is Phase.BRAKE, lap
+        ctl.phase, ctl.active = Phase.CRUISE, None   # as after a handed-back drift
+        ctl.step(far, 0.01)
+    assert ctl.next_index == 3

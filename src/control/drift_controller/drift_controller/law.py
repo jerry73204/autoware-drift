@@ -66,6 +66,7 @@ class Params:
     a: float = 1.35                     # m, CoM to the front axle
     b: float = 1.35                     # m, CoM to the rear axle
     max_steer: float = math.radians(58)
+    repeat: bool = False                # the points again after the last: laps of a closed track
     trigger_distance: float = 5.0       # m from the drift point at which the sequence starts
     min_entry_speed: float = 20.0       # m/s
     brake_accel: float = -2.0           # m/s^2, the trail-brake
@@ -158,8 +159,8 @@ class DriftController:
             self._go(Phase.RECOVER, s, f"sideslip {math.degrees(s.beta):.0f} deg")
         ph = self.phase
         if ph is Phase.CRUISE:
-            if self.next_index < len(self.points):
-                w = self.points[self.next_index]
+            if self.points and (self.p.repeat or self.next_index < len(self.points)):
+                w = self.points[self.next_index % len(self.points)]
                 if (math.hypot(w.x - s.x, w.y - s.y) < p.trigger_distance
                         and s.speed >= p.min_entry_speed):
                     self.active = w
