@@ -8,8 +8,10 @@ Isaac Sim through [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario
 (swb), which plays the scenario (OpenSCENARIO, scenario_simulator_v2) on Isaac. The plan is
 swb's roadmap 057.
 
-**Status**: started 2026-10-27. The drift controller is tested offline against a
-single-track model (on a 100 m bend: -18 deg sideslip held on a 103 m radius at 103 km/h); the car, the launch and the Isaac runs are to come.
+**Status** (2026-10-27): the drift controller is tested offline against a single-track model
+and in Isaac on swb's flat proving ground (`drift_mustang`, 100 km/h into a 100 m bend: -15.2
+deg sideslip held 6 s on 97.8 m at 109 km/h, exit, hand back); the ROS node, the launch and the
+Town05 ring scenario are written. The first Town05 lap with Autoware is next.
 
 ## Layout
 
