@@ -129,7 +129,7 @@ class DriftNode(Node):
         self.create_subscription(MrmState, "/api/fail_safe/mrm_state", self.on_mrm, 10)
         self.create_subscription(VelocityReport, "/vehicle/status/velocity_status",
                                  self.on_velocity, 10)
-        self.report = None   # (vx, vy, yaw rate)
+        self.velocity = None   # the velocity report: (vx, vy, yaw rate)
         self.create_subscription(Trajectory, "/planning/scenario_planning/trajectory",
                                  self.on_trajectory, 1)
         self.trajectory = []
@@ -175,7 +175,7 @@ class DriftNode(Node):
                             p.longitudinal_velocity_mps) for p in msg.points]
 
     def on_velocity(self, msg):
-        self.report = (msg.longitudinal_velocity, msg.lateral_velocity, msg.heading_rate)
+        self.velocity = (msg.longitudinal_velocity, msg.lateral_velocity, msg.heading_rate)
 
     def on_imu(self, msg):
         self.yaw_rate = msg.angular_velocity.z
@@ -185,8 +185,8 @@ class DriftNode(Node):
 
     def state(self):
         x, y, yaw = self.pose
-        if self.source == "velocity_report" and self.report is not None:
-            vx, vy, r = self.report
+        if self.source == "velocity_report" and self.velocity is not None:
+            vx, vy, r = self.velocity
             speed = math.hypot(vx, vy)
             lat, head, steer, pv = path_errors(self.trajectory, x, y, yaw, speed)
             return State(x, y, yaw, vx, vy, r, lat, head, steer, pv)
