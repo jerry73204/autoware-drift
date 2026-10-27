@@ -1,5 +1,5 @@
-# Autoware 1.5.0's autoware_launch velocity_smoother.param.yaml with one change, the lateral
-# acceleration limit (autoware-drift, swb roadmap 057). Passed to the ego stack as
+# Autoware 1.5.0's autoware_launch velocity_smoother.param.yaml with the lateral
+# acceleration limit, the look-ahead and the optimizer's length changed (autoware-drift, swb roadmap 057). Passed to the ego stack as
 # velocity_smoother_param_path:= (autoware_sim_profile).
 /**:
   ros__parameters:
@@ -44,7 +44,10 @@
     delta_yaw_threshold: 1.0472       # Allowed delta yaw between ego pose and trajectory pose [radian]
 
     # resampling parameters for optimization
-    max_trajectory_length: 200.0        # max trajectory length for resampling [m]
+    max_trajectory_length: 300.0        # max trajectory length for resampling [m]. autoware-drift: 300, not 200,
+                                        # so the optimizer sees all of extract_ahead_dist: at 200 its own end (185 m
+                                        # ahead) was a stop, and that stop held the ring's ~104 m bend to 12-14 m/s
+                                        # (lap 20), not the lateral or steering-rate filter
     min_trajectory_length: 180.0        # min trajectory length for resampling [m]
     resample_time: 2.0                  # resample total time for dense sampling [s]
     dense_resample_dt: 0.2              # resample time interval for dense sampling [s]
