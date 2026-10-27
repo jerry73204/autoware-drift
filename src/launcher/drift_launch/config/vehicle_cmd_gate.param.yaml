@@ -1,0 +1,41 @@
+# Autoware 1.5.0's autoware_launch vehicle_cmd_gate.param.yaml with two nominal limits raised
+# (autoware-drift, swb roadmap 057): vel_lim 30.0 m/s (upstream 25.0, under the car's 27.78) and
+# lat_acc_lim_for_steer_cmd 9.0 m/s^2 (upstream 4-5: a 104 m bend at 100 km/h takes 7.4).
+# They shape Autoware's own command only: drift_controller sits after the gate. Passed as
+# vehicle_cmd_gate_param_path:= (autoware_sim_profile 85496c1).
+/**:
+  ros__parameters:
+    update_rate: 10.0
+    system_emergency_heartbeat_timeout: 0.5
+    use_emergency_handling: true
+    check_external_emergency_heartbeat: $(var check_external_emergency_heartbeat)
+    enable_cmd_limit_filter: true
+    filter_activated_count_threshold: 5
+    filter_activated_velocity_threshold: 1.0
+    external_emergency_stop_heartbeat_timeout: 0.0
+    stop_hold_acceleration: -1.5
+    emergency_acceleration: -2.4
+    moderate_stop_service_acceleration: -1.5
+    stop_check_duration: 1.0
+    nominal:
+      vel_lim: 30.0
+      reference_speed_points: [0.1, 0.3, 20.0, 30.0]
+      steer_cmd_lim: [1.0, 1.0, 1.0, 0.8]
+      steer_rate_lim_for_steer_cmd: [1.0, 1.0, 1.0, 0.8]
+      lon_acc_lim_for_lon_vel: [5.0, 5.0, 5.0, 4.0]
+      lon_jerk_lim_for_lon_acc: [80.0, 5.0, 5.0, 4.0]  # The first element is required for quick pedal changes when stopping and starting.
+      lat_acc_lim_for_steer_cmd: [9.0, 9.0, 9.0, 9.0]
+      lat_jerk_lim_for_steer_cmd: [7.0, 7.0, 7.0, 6.0]
+      lat_jerk_lim_for_steer_rate: 10.0
+      steer_cmd_diff_lim_from_current_steer: [1.0, 1.0, 1.0, 0.8]
+    on_transition:
+      vel_lim: 50.0
+      reference_speed_points: [20.0, 30.0]
+      steer_cmd_lim: [1.0, 0.8]
+      steer_rate_lim_for_steer_cmd: [1.0, 0.8]
+      lon_acc_lim_for_lon_vel: [1.0, 0.9]
+      lon_jerk_lim_for_lon_acc: [0.5, 0.4]
+      lat_acc_lim_for_steer_cmd: [2.0, 1.8]
+      lat_jerk_lim_for_steer_cmd: [7.0, 6.0]
+      lat_jerk_lim_for_steer_rate: 10.0
+      steer_cmd_diff_lim_from_current_steer: [1.0, 0.8]

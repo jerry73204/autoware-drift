@@ -1,0 +1,23 @@
+# Autoware 1.5.0's autoware_launch planning common.param.yaml with a race car's acceleration
+# and jerk (autoware-drift, swb roadmap 057): normal max_acc 3.0 (upstream 1.0), limit 4.0, the
+# jerks 2.0 / 3.0. At upstream's 1.0 m/s^2 the car reached 16.3 m/s in the 155 m from the start
+# to Town05's first bend (lap 11, server-241); at 3.0 it reaches 100 km/h. Braking is upstream's.
+# max_vel is applied onto it by autoware_sim_profile's planning_common_param
+# (planning_common_param_base:=, autoware_sim_profile b048411).
+/**:
+  ros__parameters:
+    max_vel: 4.17           # max velocity limit [m/s]
+
+    # constraints param for normal driving
+    normal:
+      min_acc: -1.0         # min deceleration [m/ss]
+      max_acc: 3.0          # max acceleration [m/ss]
+      min_jerk: -2.0        # min jerk [m/sss]
+      max_jerk: 2.0         # max jerk [m/sss]
+
+    # constraints to be observed
+    limit:
+      min_acc: -2.5         # min deceleration limit [m/ss]
+      max_acc: 4.0          # max acceleration limit [m/ss]
+      min_jerk: -3.0        # min jerk limit [m/sss]
+      max_jerk: 3.0         # max jerk limit [m/sss]

@@ -42,7 +42,9 @@ just ego-isaac overlay:=$D/install/setup.bash map_path:=$CARLA_MAPS/Town05 \
     extra_launch:=$D/install/drift_launch/share/drift_launch/launch/drift.launch.xml \
     diagnostic_graph_path:=$D/install/drift_launch/share/drift_launch/config/diagnostics/drift.yaml \
     launch_lane_departure_checker:=false launch_autonomous_emergency_braking:=false \
-    launch_control_validator:=false
+    launch_control_validator:=false \
+    planning_common_param_base:=$D/install/drift_launch/share/drift_launch/config/common.param.yaml \
+    vehicle_cmd_gate_param_path:=$D/install/drift_launch/share/drift_launch/config/vehicle_cmd_gate.param.yaml
 just scenario $D/install/drift_launch/share/drift_launch/scenarios/town05_ring_lap.xosc sim:=isaac \
     vehicle_model:=drift_mustang initialize_duration:=300
 ```
