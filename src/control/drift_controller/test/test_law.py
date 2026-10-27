@@ -104,7 +104,9 @@ def test_off_the_path_after_the_exit_it_rejoins_before_handing_back():
     ctl.phase, ctl.t_phase, ctl.exit_beta0 = Phase.EXIT, 5.0, 0.0   # an exit run out
     off = dataclasses.replace(s, path_lat=3.0, path_yaw=0.2, path_steer=-0.05, path_speed=27.8)
     cmd = ctl.step(off, 0.01)
-    assert ctl.phase is Phase.REJOIN and cmd.override and cmd.steer == -0.05
+    assert ctl.phase is Phase.REJOIN and cmd.override
+    assert -0.12 < cmd.steer < -0.04          # the pursuit's angle, and the yaw rate it asks for
+    assert cmd.accel <= ctl.p.rejoin_accel_max
     on = dataclasses.replace(off, path_lat=0.4, path_yaw=0.05)
     cmd = ctl.step(on, 0.01)
     assert ctl.phase is Phase.CRUISE and not cmd.override

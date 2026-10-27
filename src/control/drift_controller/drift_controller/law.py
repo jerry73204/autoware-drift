@@ -74,7 +74,8 @@ class Params:
     max_steer: float = math.radians(58)
     repeat: bool = False                # the points again after the last: laps of a closed track
     trigger_distance: float = 5.0       # m from the drift point at which the sequence starts
-    min_entry_speed: float = 20.0       # m/s
+    min_entry_speed: float = 25.0       # m/s: Town05's 105 m bends hold 20 deg at ~28.6 m/s
+                                        # (docs/ring-envelope.md); at 21 the power-over spun it
     brake_accel: float = -2.0           # m/s^2, the trail-brake
     brake_time: float = 0.3             # s
     turn_in_factor: float = 2.0         # x the kinematic angle wheelbase / R
@@ -103,6 +104,11 @@ class Params:
     handback_yaw: float = 0.4            # rad (its limit is 0.52)
     rejoin_timeout: float = 10.0         # s
     k_rejoin_speed: float = 1.0          # m/s^2 per m/s
+    rejoin_accel_max: float = 1.0        # m/s^2: a locked rear axle under full drive spins a car
+                                         # that has just come out of a slide (lap 17)
+    k_rejoin_damp: float = 0.1           # rad per rad/s of yaw rate off the pursuit's
+    recover_yaw_error: float = 0.4       # rad/s: recovered only below it (a 105 m bend at 28 m/s
+                                         # turns at 0.27)
 
 
 @dataclass
@@ -150,6 +156,7 @@ class DriftController:
     integral: float = 0.0
     exit_beta0: float = 0.0
     hold_speed: float = 0.0
+    rejoin_speed: float = 0.0
     log: list = field(default_factory=list)
     armed: bool = True                  # False: no new drift starts (Autoware in an MRM)
 
@@ -160,6 +167,8 @@ class DriftController:
             self.yaw0, self.integral, self.hold_speed = s.yaw, 0.0, s.speed
         if phase is Phase.EXIT:
             self.exit_beta0 = s.beta
+        if phase is Phase.REJOIN:
+            self.rejoin_speed = s.speed
 
     def abort(self, s, why):
         """Leave a drift for RECOVER (Autoware's MRM, say); CRUISE and RECOVER stay."""
@@ -182,6 +191,15 @@ class DriftController:
 
     def _sign(self):
         return 1.0 if self.active.radius > 0 else -1.0
+
+    def _drive(self, s, target, dt):
+        """The hold's drive law on a sideslip target's magnitude, with its integral."""
+        p = self.p
+        err = target - abs(s.beta)
+        self.integral = max(-0.3, min(0.3, self.integral + err * dt))
+        accel = (p.accel_hold + p.k_drive * err + p.k_drive_i * self.integral
+                 - p.k_speed * max(0.0, s.speed - self.hold_speed))
+        return max(p.accel_min, min(p.accel_max, accel))
 
     def _hold_steer(self, s, beta_ref, r_ref):
         p = self.p
@@ -231,32 +249,38 @@ class DriftController:
                 self._go(Phase.EXIT, s, f"held {self.t_phase:.1f} s, {math.degrees(turned):.0f} deg")
                 return self.step(s, 0.0)
             beta_ref = -sign * p.target_sideslip
-            err = p.target_sideslip - abs(s.beta)
-            self.integral = max(-0.3, min(0.3, self.integral + err * dt))
             # drive holds the sideslip; past the speed the hold began at it is taken back, or a
             # power-on drift gains speed and widens its line
-            accel = (p.accel_hold + p.k_drive * err + p.k_drive_i * self.integral
-                     - p.k_speed * max(0.0, s.speed - self.hold_speed))
             return Command(self._hold_steer(s, beta_ref, r_ref),
-                           max(p.accel_min, min(p.accel_max, accel)), True)
+                           self._drive(s, p.target_sideslip, dt), True)
         if ph is Phase.EXIT:
             k = max(0.0, 1.0 - self.t_phase / p.exit_time)
             beta_ref = self.exit_beta0 * k
             if (k == 0.0 and abs(s.beta) < p.exit_sideslip
                     and abs(s.r - r_ref) < p.exit_yaw_error) or self.t_phase > 4 * p.exit_time:
                 return self._hand_back(s, "handed back")
-            return Command(self._hold_steer(s, beta_ref, r_ref), p.accel_hold * k, True)
+            # The drive follows the sideslip target down rather than stopping: cut at once, the
+            # rear grips while the front is still countersteered and the car snaps the other
+            # way (lap 17: -2.0 rad/s).
+            return Command(self._hold_steer(s, beta_ref, r_ref),
+                           self._drive(s, abs(beta_ref), dt), True)
         if ph is Phase.REJOIN:
             if self._on_path(s) or self.t_phase > p.rejoin_timeout or s.path_steer is None:
                 why = "rejoined" if self._on_path(s) else "rejoin timed out"
                 self._go(Phase.CRUISE, s, why)
                 self.active = None
                 return Command(0.0, 0.0, False)
-            target = s.path_speed if s.path_speed is not None else s.speed
-            accel = max(p.accel_min, min(p.accel_max, p.k_rejoin_speed * (target - s.speed)))
-            return Command(max(-p.max_steer, min(p.max_steer, s.path_steer)), accel, True)
+            # Gently: no faster than the car came in, little drive, and the pursuit's steering
+            # damped by the yaw rate it should have (lap 17 spun in REJOIN at full drive).
+            target = min(s.path_speed if s.path_speed is not None else s.speed, self.rejoin_speed)
+            accel = max(p.accel_min, min(p.rejoin_accel_max, p.k_rejoin_speed * (target - s.speed)))
+            v = max(s.speed, 1.0)
+            r_path = v * math.tan(s.path_steer) / (p.a + p.b)
+            steer = s.path_steer - p.k_rejoin_damp * (s.r - r_path)
+            return Command(max(-p.max_steer, min(p.max_steer, steer)), accel, True)
         if ph is Phase.RECOVER:
-            if abs(s.beta) < p.recover_sideslip and self.t_phase > 0.5:
+            if (abs(s.beta) < p.recover_sideslip and self.t_phase > 0.5
+                    and abs(s.r) < p.recover_yaw_error):
                 return self._hand_back(s, "recovered")
             steer = max(-p.max_steer, min(p.max_steer, s.beta))
             return Command(steer, p.recover_accel, True)
