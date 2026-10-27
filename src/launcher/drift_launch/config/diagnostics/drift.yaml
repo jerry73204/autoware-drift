@@ -3,7 +3,9 @@
 # autonomous mode while Autoware keeps every other check:
 #   - the control subgraph is this package's control.yaml (no AEB, lane departure or control
 #     state under /autoware/control);
-#   - trajectory_validation leaves out trajectory_shift (a drift line moves the trajectory).
+#   - trajectory_validation leaves out trajectory_shift (a drift line moves the trajectory);
+#   - NDT's scan matching status counts only as an ERROR, not a WARN (lap 10 on server-241: six
+#     MRMs from "NDT exe time is too long", 105-147 ms against its 100 ms bound, NDT itself fine).
 # Passed to the ego stack as diagnostic_graph_path:= (autoware_sim_profile 77538e2).
 # CARLA Simulator Specific Diagnostic Configuration
 # This builds the diagnostic graph with increased timeouts suitable for CARLA simulation
@@ -95,7 +97,10 @@ units:
         link: /autoware/localization/state
       - type: and
         list:
-          - { type: link, link: /autoware/localization/scan_matching_status }
+          # A WARN of NDT's (on a loaded host: "NDT exe time is too long", over its 100 ms
+          # bound) does not end autonomous mode; an ERROR (no convergence) still does.
+          - type: warn-to-ok
+            item: { type: link, link: /autoware/localization/scan_matching_status }
           - { type: link, link: /autoware/localization/accuracy }
           - { type: link, link: /autoware/localization/sensor_fusion_status }
 
