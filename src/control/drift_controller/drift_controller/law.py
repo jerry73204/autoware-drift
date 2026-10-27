@@ -93,9 +93,11 @@ class Params:
     # Autoware's trajectory (+ left) and per rad of course error (heading error + sideslip), so a
     # drift that cuts inside the bend is turned out (lap 27 circled 70 m in a 104 m bend), after
     # Goh, Goel & Gerdes 2019, drifting along a path. Clamped to path_r_max.
-    k_path: float = 0.02                # rad/s per m
+    k_path: float = 0.06                # rad/s per m (0.02 crept 7 m inside on lap 28)
+    k_path_drive: float = 0.0           # m/s^2 less drive per m inside the line (drive raises r;
+                                        # on the model it widened the line at 27 m/s: off)
     k_course: float = 0.3               # rad/s per rad
-    path_r_max: float = 0.15            # rad/s
+    path_r_max: float = 0.25            # rad/s
     # ... and the sideslip target less this much per m inside the line (more outside), within
     # [beta_min, beta_max]: an unreachable target fights the yaw-rate term and wins (lap 27)
     k_path_beta: float = 0.0            # rad per m (off: on the model it took the drift away, lap 27 notes)
@@ -212,6 +214,9 @@ class DriftController:
         self.integral = max(-0.3, min(0.3, self.integral + err * dt))
         accel = (p.accel_hold + p.k_drive * err + p.k_drive_i * self.integral
                  - p.k_speed * max(0.0, s.speed - self.hold_speed))
+        if s.path_lat is not None and self.active is not None:
+            inside = (1.0 if self.active.radius > 0 else -1.0) * s.path_lat
+            accel -= p.k_path_drive * max(0.0, inside)
         return max(p.accel_min, min(p.accel_max, accel))
 
     def _hold_steer(self, s, beta_ref, r_ref):
