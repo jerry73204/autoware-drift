@@ -7,12 +7,10 @@
 # 15 m before the bend's arc starts: the trail-brake and turn-in come before the bend. radius
 # is the lane's (the reference line's arc plus 5.25 m). Computed from main.xodr's arcs:
 #   road 37 s 146.8 (R 99.2), road 37 s 503.8 (R 97.2), road 38 s 55.4 (R 101.2),
-#   road 34 s 88.1 (R 101.0); then each snapped to the nearest lanelet centre line of the car's lane
-#   chain (lanelets 53191, 73626: north_west and south_east had been 1.4 m off it, between two
-#   lanes; csb 241 found the map's lanes 1-1.5 m from the OpenDRIVE centres there).
+#   road 34 s 88.1 (R 101.0); checked against the map's nodes (within 0.3-1.7 m).
 frame: map
 points:
-  - {name: north_west, x: -124.9, y: 205.5, radius: 104.5, angle_deg: 90}
+  - {name: north_west, x: -124.8, y: 204.1, radius: 104.5, angle_deg: 90}
   - {name: south_west, x: -244.0, y: -86.2, radius: 102.5, angle_deg: 90}
-  - {name: south_east, x: 84.6, y: -206.9, radius: 106.5, angle_deg: 90}
+  - {name: south_east, x: 84.6, y: -205.5, radius: 106.5, angle_deg: 90}
   - {name: north_east, x: 206.4, y: 84.4, radius: 106.2, angle_deg: 90}
