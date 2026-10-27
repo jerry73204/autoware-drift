@@ -1,0 +1,9 @@
+# Town05's surface map for swb_isaac_world (swb roadmap 047): the surface layer on, with every
+# road label on swb's asphalt class (the reference: mu 1.12, the friction past the tire's peak
+# falling to 0.8 of it with the combined slip, swb_isaac_world config/surface_classes.yaml).
+# Without a surface map the world server leaves each wheel on the rig's own tire curve and
+# nothing past the peak changes with the ground. No zones: the ring is dry asphalt throughout.
+# The lap script copies this file to <Town05 map dir>/surfaces.yaml for the run and removes it
+# afterwards (the map directory is shared with other runs on the host).
+defaults: {Road: asphalt, RoadLine: asphalt, SideWalk: concrete, Terrain: grass, Ground: dirt,
+           unlabelled: asphalt}
