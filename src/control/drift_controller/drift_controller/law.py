@@ -68,8 +68,9 @@ class DriftPoint:
 
 @dataclass
 class Params:
-    a: float = 1.35                     # m, CoM to the front axle
-    b: float = 1.35                     # m, CoM to the rear axle
+    # drift_mustang (sim_vehicle_spec): wheel_base 2.886 m, com_front_fraction 0.50
+    a: float = 1.443                    # m, CoM to the front axle
+    b: float = 1.443                    # m, CoM to the rear axle
     max_steer: float = math.radians(58)
     repeat: bool = False                # the points again after the last: laps of a closed track
     trigger_distance: float = 5.0       # m from the drift point at which the sequence starts

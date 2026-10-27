@@ -54,7 +54,7 @@ def load_points(path):
                        math.radians(p.get("angle_deg", 0.0))) for p in doc["points"]]
 
 
-WHEEL_BASE = 2.886  # drift_mustang's; the pure pursuit's only geometry
+WHEEL_BASE = 2.886  # drift_mustang's (law.Params a + b); the pure pursuit's only geometry
 
 
 def path_errors(points, x, y, yaw, speed):
