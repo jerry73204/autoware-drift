@@ -1,7 +1,9 @@
 # The race stack: option 3, designed
 
 A design to review before anything is built (user, 2026-10-27: "Try option 1. If it's not
-working, go option 3 and explore the design first"). Option 1 ([autoware-in-a-drift.md](autoware-in-a-drift.md))
+working, go option 3 and explore the design first"). Decisions (user, 2026-10-28): we build our
+own planner stack; the controller is C++; supervision changes Autoware's stock monitoring to
+fit racing rather than adding a supervisor of our own. Option 1 ([autoware-in-a-drift.md](autoware-in-a-drift.md))
 got laps and drifts on Town05's ring, but each lap found a new way Autoware and a bolted-on
 drift law disagree, and the margins are thin; this is the stack that removes the disagreement.
 References: [related-work.md](related-work.md); the ring's physics: [ring-envelope.md](ring-envelope.md).
@@ -100,22 +102,35 @@ Autoware's own, so SSv2, the relay and swb stay as they are.
   (acceleration request, which sim_vehicle_ecu turns into torque through the locked axle) are its
   inputs; the steering lock, rate and drive limits its constraints; the track boundaries as soft
   constraints.
-- **Solver**: acados (BSD-2-Clause, C code generation, real time at 50-100 Hz for a 1-2 s
-  horizon) or Liniger's MPCC formulation (Apache-2.0, hpipm) for the contouring cost.
+- **C++** (user, 2026-10-28), a ROS 2 component like Autoware's own controllers, in this
+  repository's `src/control/`.
+- **Solver**: acados (BSD-2-Clause, C code generated from the model, real time at 50-100 Hz for
+  a 1-2 s horizon; the model and cost are written once in its Python or MATLAB front end and the
+  generated C is what the C++ node links) or Liniger's MPCC formulation (Apache-2.0, C++, hpipm)
+  for the contouring cost.
 - **Fallback**: the existing drift law (law.py) with its path term, for the proving ground and as
   the controller while the MPC is built; Goh/Goel/Gerdes's model inversion as a second option.
 - **Out**: `/control/trajectory_follower/control_cmd` (Autoware's Control), so the gate, the
   transition manager and the MRM handler see a normal follower.
 
-### Race supervisor
+### Supervision: Autoware's own monitoring, set for racing
 
-- Units in the diagnostic graph in place of the road checks: inside the track (distance to the
-  boundary, not to the lane centre), inside the recoverable envelope (sideslip and yaw rate
-  against the plan's, a spin), the estimator's health (NDT's NVTL and skips), stale inputs.
-- Its own abort is the controller's: straighten along the travel and brake with the wheels
-  rolling; Autoware's MRM (which holds the wheel and brakes) is reached only on a real fault, and
-  even then the controller steers its stop along the plan (as drift_controller does since lap 25).
+No supervisor of our own (user, 2026-10-28): the stock monitors stay, configured for a race
+track instead of a road, and judge the race stack as they judge Autoware's planner and follower.
 
+| stock monitor | on a road | for racing |
+|---|---|---|
+| diagnostic graph (`autoware_diagnostic_graph_aggregator`) | road checks under each operation mode | a race graph: the race nodes' topic rates and node health in place of the planner's and follower's; the road checks out of the autonomous mode (option 1's `drift.yaml` is its start) |
+| lane departure checker (`autoware_lane_departure_checker`) | the footprint against the lane | the footprint against the track's road boundary (its `boundary_types_to_detect` and margins), so leaving the track, not the lane, is the fault |
+| control validator (`autoware_control_validator`) | the follower's deviation from the trajectory, 1 m / 1 rad | its thresholds at a drift's: the plan's line with the sideslip and lateral error the plan allows |
+| planning validator (`autoware_planning_validator`) | curvature point to point, lateral acceleration 9.8, the trajectory's shift | the race planner's trajectory with the race car's limits (g-g diagram), curvature over the plan's own spacing |
+| AEB, obstacle collision checker | obstacles on the path | kept for traffic (the ring is empty today), off until perception is part of the race |
+| localization monitors (`ndt_scan_matcher` diagnostics, `localization_error_monitor`) | NDT's state, the EKF's covariance | kept, reading the race estimator's covariance; NDT's exe-time WARN not a fault (option 1's `warn-to-ok`) |
+| MRM handler, emergency stop operator | a comfortable or emergency stop | kept; the emergency stop holds the wheel, so the race controller steers it along the plan (as drift_controller does since lap 25) |
+
+What the stock monitors cannot see -- a spin (sideslip and yaw rate outside the recoverable
+envelope) -- is the race controller's own diagnostic, published under the control unit of the
+race graph, so a spin is an MRM like any fault.
 ## Interfaces (new)
 
 | topic | type | from -> to |
@@ -124,7 +139,7 @@ Autoware's own, so SSv2, the relay and swb stay as they are.
 | `/race/plan` | `race_msgs/RacePlan` (per point: s, pose, speed, sideslip, yaw rate, mode grip/drift) | planner -> controller, supervisor |
 | `/planning/scenario_planning/trajectory` | autoware_planning_msgs/Trajectory | planner -> Autoware (gate, transition manager, validator) |
 | `/control/trajectory_follower/control_cmd` | autoware_control_msgs/Control | controller -> gate |
-| diagnostics `race_supervisor` | diagnostic_msgs | supervisor -> graph |
+| diagnostics of the race nodes (rates, the controller's envelope) | diagnostic_msgs | race nodes -> the race graph |
 
 ## Milestones
 
@@ -139,12 +154,28 @@ Autoware's own, so SSv2, the relay and swb stay as they are.
    pruned one.
 5. **Estimator stage 1**: the filter replacing the vehicle report, judged on recorded laps.
 
-## Open questions (for the user)
+## Decided, and still open
 
-- The controller's language: Python with acados' generated C solver (fast to build, ROS 2 node in
-  Python), or C++ (Autoware's own controllers are); start in Python.
-- Licenses: TUM's planner and estimator are GPL/LGPL; this repository is Apache-2.0, so they are
-  references or separate tools, not linked.
-- How much of Autoware to keep long term: perception and NDT are needed only if the ring gets
-  traffic or the state must come from sensors; with the simulator's state the stack could drop
-  them, but then it is no longer an Autoware project.
+- **Decided** (user, 2026-10-28): our own planner stack; the controller in C++; Autoware's stock
+  monitoring set for racing in place of a supervisor of our own.
+- **TUM's GPL / LGPL code**: what each does and how it may be used is below ("TUM's code").
+- **Open**: how much of Autoware to keep long term (perception and NDT are needed only if the
+  ring gets traffic or the state must come from sensors).
+
+## TUM's code: what it is for, and how we may use it
+
+TUM's autonomous racing group (Roborace, Indy Autonomous Challenge, A2RL) published parts of
+their stack. Each is a working answer to one of our components, so it is the reference to read
+first; their licenses decide whether we may run it, link it, or only learn from it.
+
+| repository | license | what it does | our component | how we may use it |
+|---|---|---|---|---|
+| global_racetrajectory_optimization | LGPL-3.0, Python | offline: from a track's boundaries, the racing line (minimum curvature, iterative minimum curvature, or minimum time) and its speed profile from a g-g-v diagram | global planner | run it as an offline tool on Town05's ring: its output (a line, a CSV) is ours, so no license reaches our code; changes to the tool itself would stay LGPL |
+| trajectory_planning_helpers | LGPL-3.0, Python | its library: splines, curvature, the forward-backward speed profile | global planner | as above, through the tool |
+| GraphBasedLocalTrajectoryPlanner | LGPL-3.0, Python | online: a lattice of offsets around the racing line, the best collision-free path each cycle (rejoins, overtakes) | local planner | LGPL lets a program use it as a library without becoming LGPL; but our planner node is C++ and it is Python, so it is the design to follow, rewritten |
+| sampling_based_3D_local_planning | GPL-3.0, Python | A2RL's local planner: sampled trajectories on a 3D track | local planner | GPL: code taken into ours makes ours GPL; read the paper, write our own |
+| 3DVehicleDynamicsStateEstimation | GPL-3.0, C++, ROS 2 | the state estimator: a point-mass EKF for pose and velocity, a single-track UKF for sideslip, an IMU handler | estimator | GPL: it could run unmodified as its own ROS node beside ours (separate programs talking over topics), but linking or copying it makes ours GPL; we write ours from its paper, since the estimator is ours to tune for drifting |
+
+So: the racing line can come from TUM's tool directly (offline, its output ours); the local
+planner and the estimator are written by us in C++ following TUM's designs; nothing of TUM's is
+linked into this Apache-2.0 repository.
