@@ -39,7 +39,10 @@ just run sim:=isaac
 just ego-isaac overlay:=$D/install/setup.bash map_path:=$CARLA_MAPS/Town05 \
     vehicle_model:=drift_mustang sensor_model:=drift_mustang_sensor_kit max_velocity:=27.78 \
     velocity_smoother_param_path:=$D/install/drift_launch/share/drift_launch/config/velocity_smoother.param.yaml \
-    extra_launch:=$D/install/drift_launch/share/drift_launch/launch/drift.launch.xml
+    extra_launch:=$D/install/drift_launch/share/drift_launch/launch/drift.launch.xml \
+    diagnostic_graph_path:=$D/install/drift_launch/share/drift_launch/config/diagnostics/drift.yaml \
+    launch_lane_departure_checker:=false launch_autonomous_emergency_braking:=false \
+    launch_control_validator:=false
 just scenario $D/install/drift_launch/share/drift_launch/scenarios/town05_ring_lap.xosc sim:=isaac \
     vehicle_model:=drift_mustang initialize_duration:=300
 ```
@@ -48,6 +51,13 @@ Run at the default rates (60 Hz physics, SSv2's 20 Hz frames): at `physics_hz:=2
 `frame_rate:=100` the simulation ran at ~0.2x real time on server-241, and Autoware's wall-clock
 monitors never let it engage (lap 1-2, 2026-10-27); on the proving ground the drift was the same
 at both rates.
+
+The last four arguments are option 1 of [docs/autoware-in-a-drift.md](docs/autoware-in-a-drift.md):
+Autoware tolerates a drift. Its diagnostic graph (`config/diagnostics/drift.yaml`) judges
+autonomous mode without AEB, lane departure, the MPC's control state and the trajectory shift,
+and those checkers are not launched. The controller hands the car back only within 1.0 m and
+0.4 rad of Autoware's trajectory (its transition manager refuses past 1.5 m and 0.52 rad),
+rejoining it first by pure pursuit, and aborts a drift when Autoware is in an MRM.
 
 `/drift/state` reports each drift (bend, phase, speed, sideslip, yaw rate); the vehicle takes
 its command from `/control/command/drift/control_cmd`, which the controller fills with

@@ -11,6 +11,9 @@ The vehicle bridge takes the car's Control from the second topic (aib's ego conf
 What the law needs, from what Autoware already has:
 - pose and yaw: `/localization/kinematic_state` (the EKF);
 - yaw rate: the IMU (`/sensing/imu/imu_data`, Autoware's corrected one);
+- Autoware's trajectory: `/planning/scenario_planning/trajectory`, for the hand-back: the car's
+  lateral and heading error from its nearest point and a pure-pursuit tire angle onto it
+  (the law's REJOIN), so Autoware takes the car back within its transition manager's limits.
 - Autoware's emergency: `/api/fail_safe/mrm_state`. While an MRM runs no drift starts; one under
   way is aborted to RECOVER (steering along the car's travel, so it does not spin under
   braking), braking at least as hard as Autoware's command asks; after it, Autoware's own
@@ -30,6 +33,7 @@ import rclpy
 import yaml
 from autoware_adapi_v1_msgs.msg import MrmState
 from autoware_control_msgs.msg import Control
+from autoware_planning_msgs.msg import Trajectory
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -48,6 +52,29 @@ def load_points(path):
     doc = yaml.safe_load(open(path))
     return [DriftPoint(p["x"], p["y"], p["radius"], p.get("name", ""),
                        math.radians(p.get("angle_deg", 0.0))) for p in doc["points"]]
+
+
+WHEEL_BASE = 2.886  # drift_mustang's; the pure pursuit's only geometry
+
+
+def path_errors(points, x, y, yaw, speed):
+    """(lateral error, heading error, pure-pursuit tire angle, speed) against a trajectory's
+    poses [(x, y, yaw, v)], from the nearest point; None when there is no trajectory."""
+    if len(points) < 2:
+        return None, None, None, None
+    i = min(range(len(points)), key=lambda k: (points[k][0] - x) ** 2 + (points[k][1] - y) ** 2)
+    px, py, pyaw, pv = points[i]
+    lat = -(x - px) * math.sin(pyaw) + (y - py) * math.cos(pyaw)
+    head = math.remainder(yaw - pyaw, math.tau)
+    look = max(6.0, 0.6 * speed)
+    j, run = i, 0.0
+    while j + 1 < len(points) and run < look:
+        run += math.hypot(points[j + 1][0] - points[j][0], points[j + 1][1] - points[j][1])
+        j += 1
+    tx, ty = points[j][0], points[j][1]
+    alpha = math.remainder(math.atan2(ty - y, tx - x) - yaw, math.tau)
+    steer = math.atan2(2 * WHEEL_BASE * math.sin(alpha), max(math.hypot(tx - x, ty - y), 1.0))
+    return lat, head, steer, pv
 
 
 class TravelEstimate:
@@ -91,6 +118,9 @@ class DriftNode(Node):
         self.create_subscription(Imu, "/sensing/imu/imu_data", self.on_imu,
                                  qos_profile_sensor_data)
         self.create_subscription(MrmState, "/api/fail_safe/mrm_state", self.on_mrm, 10)
+        self.create_subscription(Trajectory, "/planning/scenario_planning/trajectory",
+                                 self.on_trajectory, 1)
+        self.trajectory = []
         self.mrm = False
         self.create_timer(self.dt, self.tick)
         self.create_timer(1.0, self.report)
@@ -128,6 +158,10 @@ class DriftNode(Node):
         self.mrm = mrm
         self.law.armed = not mrm
 
+    def on_trajectory(self, msg):
+        self.trajectory = [(p.pose.position.x, p.pose.position.y, yaw_of(p.pose.orientation),
+                            p.longitudinal_velocity_mps) for p in msg.points]
+
     def on_imu(self, msg):
         self.yaw_rate = msg.angular_velocity.z
 
@@ -140,7 +174,9 @@ class DriftNode(Node):
         beta = 0.0
         if self.travel.course is not None:
             beta = math.remainder(self.travel.course - yaw, math.tau)
-        return State(x, y, yaw, speed * math.cos(beta), speed * math.sin(beta), self.yaw_rate)
+        lat, head, steer, pv = path_errors(self.trajectory, x, y, yaw, speed)
+        return State(x, y, yaw, speed * math.cos(beta), speed * math.sin(beta), self.yaw_rate,
+                     lat, head, steer, pv)
 
     def tick(self):
         if self.pose is None:

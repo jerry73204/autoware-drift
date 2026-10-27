@@ -10,8 +10,12 @@ A drift is taken at a waypoint on a turn of known radius and direction. The mach
               passes `enter_sideslip` (or `turn_in_timeout` passes: the drift is abandoned).
     HOLD      The drift: steering on sideslip and yaw-rate error, drive on sideslip error,
               for `hold_time` or `hold_angle` of heading change, whichever comes first.
-    EXIT      The sideslip target ramps to zero over `exit_time`; the car is handed back to
-              Autoware once sideslip and yaw-rate error are small.
+    EXIT      The sideslip target ramps to zero over `exit_time`; then the car is handed back to
+              Autoware once sideslip and yaw-rate error are small and it is within the hand-back
+              limits of Autoware's trajectory, else it goes to REJOIN.
+    REJOIN    Pure pursuit of Autoware's trajectory at its speed until the car is within the
+              hand-back limits (Autoware's transition manager refuses autonomous mode past
+              1.5 m and 0.52 rad), then CRUISE; past `rejoin_timeout` handed back anyway.
     RECOVER   Sideslip or yaw rate past its limit (a spin starting): countersteer along the
               velocity, brake gently, until stable; then CRUISE.
 
@@ -49,6 +53,7 @@ class Phase(Enum):
     HOLD = "hold"
     EXIT = "exit"
     RECOVER = "recover"
+    REJOIN = "rejoin"
 
 
 @dataclass
@@ -93,6 +98,10 @@ class Params:
     max_sideslip: float = math.radians(50)
     recover_accel: float = -2.0
     recover_sideslip: float = math.radians(4)
+    handback_lat: float = 1.0            # m from Autoware's trajectory (its limit is 1.5)
+    handback_yaw: float = 0.4            # rad (its limit is 0.52)
+    rejoin_timeout: float = 10.0         # s
+    k_rejoin_speed: float = 1.0          # m/s^2 per m/s
 
 
 @dataclass
@@ -104,6 +113,13 @@ class State:
     vx: float               # m/s, body frame
     vy: float
     r: float                # rad/s
+
+    # Autoware's trajectory as the node sees it (None: no trajectory): the car's lateral and
+    # heading error from its nearest point, a pure-pursuit tire angle onto it, and its speed there.
+    path_lat: float = None
+    path_yaw: float = None
+    path_steer: float = None
+    path_speed: float = None
 
     @property
     def speed(self):
@@ -149,6 +165,20 @@ class DriftController:
         if self.phase not in (Phase.CRUISE, Phase.RECOVER):
             self._go(Phase.RECOVER, s, f"aborted: {why}")
 
+    def _on_path(self, s):
+        """Within the hand-back limits of Autoware's trajectory (no trajectory: no limit)."""
+        p = self.p
+        return s.path_lat is None or (abs(s.path_lat) < p.handback_lat
+                                      and abs(s.path_yaw) < p.handback_yaw)
+
+    def _hand_back(self, s, why):
+        if self._on_path(s):
+            self._go(Phase.CRUISE, s, why)
+            self.active = None
+            return Command(0.0, 0.0, False)
+        self._go(Phase.REJOIN, s, f"{why}, {s.path_lat:+.1f} m {math.degrees(s.path_yaw):+.0f} deg off")
+        return self.step(s, 0.0)
+
     def _sign(self):
         return 1.0 if self.active.radius > 0 else -1.0
 
@@ -192,7 +222,7 @@ class DriftController:
                 self._go(Phase.EXIT, s, "no sideslip")
                 return self.step(s, 0.0)
             return Command(turn_in, p.turn_in_accel, True)
-        r_ref = s.speed / self.active.radius
+        r_ref = s.speed / self.active.radius if self.active else 0.0
         if ph is Phase.HOLD:
             turned = abs(math.remainder(s.yaw - self.yaw0, math.tau))
             limit = (self.active.angle - p.exit_lead) if self.active.angle else p.hold_angle
@@ -213,15 +243,20 @@ class DriftController:
             beta_ref = self.exit_beta0 * k
             if (k == 0.0 and abs(s.beta) < p.exit_sideslip
                     and abs(s.r - r_ref) < p.exit_yaw_error) or self.t_phase > 4 * p.exit_time:
-                self._go(Phase.CRUISE, s, "handed back")
+                return self._hand_back(s, "handed back")
+            return Command(self._hold_steer(s, beta_ref, r_ref), p.accel_hold * k, True)
+        if ph is Phase.REJOIN:
+            if self._on_path(s) or self.t_phase > p.rejoin_timeout or s.path_steer is None:
+                why = "rejoined" if self._on_path(s) else "rejoin timed out"
+                self._go(Phase.CRUISE, s, why)
                 self.active = None
                 return Command(0.0, 0.0, False)
-            return Command(self._hold_steer(s, beta_ref, r_ref), p.accel_hold * k, True)
+            target = s.path_speed if s.path_speed is not None else s.speed
+            accel = max(p.accel_min, min(p.accel_max, p.k_rejoin_speed * (target - s.speed)))
+            return Command(max(-p.max_steer, min(p.max_steer, s.path_steer)), accel, True)
         if ph is Phase.RECOVER:
             if abs(s.beta) < p.recover_sideslip and self.t_phase > 0.5:
-                self._go(Phase.CRUISE, s, "recovered")
-                self.active = None
-                return Command(0.0, 0.0, False)
+                return self._hand_back(s, "recovered")
             steer = max(-p.max_steer, min(p.max_steer, s.beta))
             return Command(steer, p.recover_accel, True)
         raise AssertionError(ph)

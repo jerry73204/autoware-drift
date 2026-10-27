@@ -94,3 +94,18 @@ def test_an_mrm_aborts_a_drift_to_recover_and_arms_nothing():
     ctl.phase, ctl.armed = Phase.CRUISE, False
     ctl.step(State(300.0, 0.0, 0.0, 27.8, 0.0, 0.0), 0.01)
     assert ctl.phase is Phase.CRUISE
+
+
+def test_off_the_path_after_the_exit_it_rejoins_before_handing_back():
+    import dataclasses
+    ctl = DriftController([DriftPoint(10.0, 0.0, 100.0)])
+    s = State(10.0, 0.0, 0.0, 27.8, 0.0, 0.0)
+    ctl.step(s, 0.01)
+    ctl.phase, ctl.t_phase, ctl.exit_beta0 = Phase.EXIT, 5.0, 0.0   # an exit run out
+    off = dataclasses.replace(s, path_lat=3.0, path_yaw=0.2, path_steer=-0.05, path_speed=27.8)
+    cmd = ctl.step(off, 0.01)
+    assert ctl.phase is Phase.REJOIN and cmd.override and cmd.steer == -0.05
+    on = dataclasses.replace(off, path_lat=0.4, path_yaw=0.05)
+    cmd = ctl.step(on, 0.01)
+    assert ctl.phase is Phase.CRUISE and not cmd.override
+    assert [p for p, _ in ctl.log][-2:] == ["rejoin", "cruise"]
