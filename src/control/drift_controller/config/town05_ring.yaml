@@ -4,13 +4,14 @@
 # along OpenDRIVE's reference line), so every bend is a left turn of 90 deg.
 #
 # Each point is on the middle driving lane (lane -2, 5.25 m right of the reference line),
-# 15 m before the bend's arc starts: the trail-brake and turn-in come before the bend. radius
+# at the bend's arc start (lap 27 placed them 15 m before it and the drift rotated early, cutting
+# 30 m inside; on the model the arc start holds the line within 2 m at 28-29 m/s). radius
 # is the lane's (the reference line's arc plus 5.25 m). Computed from main.xodr's arcs:
 #   road 37 s 146.8 (R 99.2), road 37 s 503.8 (R 97.2), road 38 s 55.4 (R 101.2),
 #   road 34 s 88.1 (R 101.0); checked against the map's nodes (within 0.3-1.7 m).
 frame: map
 points:
-  - {name: north_west, x: -124.8, y: 204.1, radius: 104.5, angle_deg: 90}
-  - {name: south_west, x: -244.0, y: -86.2, radius: 102.5, angle_deg: 90}
-  - {name: south_east, x: 84.6, y: -205.5, radius: 106.5, angle_deg: 90}
-  - {name: north_east, x: 206.4, y: 84.4, radius: 106.2, angle_deg: 90}
+  - {name: north_west, x: -139.8, y: 204.1, radius: 104.5, angle_deg: 90}
+  - {name: south_west, x: -244.2, y: -101.2, radius: 102.5, angle_deg: 90}
+  - {name: south_east, x: 99.6, y: -205.5, radius: 106.5, angle_deg: 90}
+  - {name: north_east, x: 206.2, y: 99.4, radius: 106.2, angle_deg: 90}

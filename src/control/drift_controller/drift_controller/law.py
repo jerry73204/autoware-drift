@@ -74,8 +74,9 @@ class Params:
     max_steer: float = math.radians(58)
     repeat: bool = False                # the points again after the last: laps of a closed track
     trigger_distance: float = 5.0       # m from the drift point at which the sequence starts
-    min_entry_speed: float = 25.0       # m/s: Town05's 105 m bends hold 20 deg at ~28.6 m/s
-                                        # (docs/ring-envelope.md); at 21 the power-over spun it
+    min_entry_speed: float = 27.0       # m/s: a steady drift's radius is ~v^2 / a_y, so a 104 m
+                                        # bend wants ~28 m/s (docs/ring-envelope.md: 28.6 for 20
+                                        # deg); lap 27 entered at 25.6 and circled 70 m
     brake_accel: float = -2.0           # m/s^2, the trail-brake
     brake_time: float = 0.3             # s
     turn_in_factor: float = 2.0         # x the kinematic angle wheelbase / R
@@ -88,6 +89,18 @@ class Params:
     exit_lead: float = math.radians(20)          # a bend's hold ends this short of its turn, for the exit
     k_beta: float = 1.5
     k_r: float = 1.0                    # rad per rad/s
+    # The hold's line: the yaw-rate target v / R less this much per m of lateral error to
+    # Autoware's trajectory (+ left) and per rad of course error (heading error + sideslip), so a
+    # drift that cuts inside the bend is turned out (lap 27 circled 70 m in a 104 m bend), after
+    # Goh, Goel & Gerdes 2019, drifting along a path. Clamped to path_r_max.
+    k_path: float = 0.02                # rad/s per m
+    k_course: float = 0.3               # rad/s per rad
+    path_r_max: float = 0.15            # rad/s
+    # ... and the sideslip target less this much per m inside the line (more outside), within
+    # [beta_min, beta_max]: an unreachable target fights the yaw-rate term and wins (lap 27)
+    k_path_beta: float = 0.0            # rad per m (off: on the model it took the drift away, lap 27 notes)
+    beta_min: float = math.radians(5)
+    beta_max: float = math.radians(25)
     accel_hold: float = 0.0             # m/s^2: drive past the drag spins the rear and widens the line
     k_drive: float = 20.0               # m/s^2 per rad
     k_drive_i: float = 10.0             # m/s^2 per rad s
@@ -242,17 +255,24 @@ class DriftController:
                 return self.step(s, 0.0)
             return Command(turn_in, p.turn_in_accel, True)
         r_ref = s.speed / self.active.radius if self.active else 0.0
+        if s.path_lat is not None and ph in (Phase.HOLD, Phase.EXIT):
+            course = math.remainder(s.path_yaw + s.beta, math.tau)
+            fix = -p.k_path * s.path_lat - p.k_course * course
+            r_ref += max(-p.path_r_max, min(p.path_r_max, fix))
         if ph is Phase.HOLD:
             turned = abs(math.remainder(s.yaw - self.yaw0, math.tau))
             limit = (self.active.angle - p.exit_lead) if self.active.angle else p.hold_angle
             if self.t_phase >= p.hold_time or turned >= limit:
                 self._go(Phase.EXIT, s, f"held {self.t_phase:.1f} s, {math.degrees(turned):.0f} deg")
                 return self.step(s, 0.0)
-            beta_ref = -sign * p.target_sideslip
+            target = p.target_sideslip
+            if s.path_lat is not None:  # + inside a left bend, so sign * lat is inside either way
+                target = max(p.beta_min, min(p.beta_max, target - p.k_path_beta * sign * s.path_lat))
+            beta_ref = -sign * target
             # drive holds the sideslip; past the speed the hold began at it is taken back, or a
             # power-on drift gains speed and widens its line
             return Command(self._hold_steer(s, beta_ref, r_ref),
-                           self._drive(s, p.target_sideslip, dt), True)
+                           self._drive(s, target, dt), True)
         if ph is Phase.EXIT:
             k = max(0.0, 1.0 - self.t_phase / p.exit_time)
             beta_ref = self.exit_beta0 * k

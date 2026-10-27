@@ -111,3 +111,35 @@ def test_off_the_path_after_the_exit_it_rejoins_before_handing_back():
     cmd = ctl.step(on, 0.01)
     assert ctl.phase is Phase.CRUISE and not cmd.override
     assert [p for p, _ in ctl.log][-2:] == ["rejoin", "cruise"]
+
+
+def test_a_drift_from_the_arc_start_holds_the_bends_line():
+    """Lap 27: a drift that cut 30 m inside its 104 m bend; from the arc start at 28 m/s, with
+    the path term, the model keeps within 4 m of the line."""
+    R, X0 = 104.0, 60.0
+
+    def path(x, y, yaw):
+        if x < X0:
+            return y, math.remainder(yaw, math.tau)
+        d = math.hypot(x - X0, y - R)
+        th = math.atan2(y - R, x - X0)
+        return R - d, math.remainder(yaw - (th + math.pi / 2), math.tau)
+
+    sim = Sim(vx=28.0)
+    ctl = DriftController([DriftPoint(X0, 0.0, R, "bend", math.radians(90))])
+    t, next_ctl, cmd, worst = 0.0, 0.0, None, 0.0
+    while t < 16.0:
+        if t >= next_ctl:
+            lat, head = path(sim.x, sim.y, sim.yaw)
+            s = State(sim.x, sim.y, sim.yaw, sim.vx, sim.vy, sim.r, lat, head, None, None)
+            cmd = ctl.step(s, 0.01)
+            if not cmd.override:
+                cmd.steer = s.beta + 1.443 * s.r / max(s.speed, 1.0)
+                cmd.accel = 28.0 - s.speed
+            if ctl.phase in (Phase.HOLD, Phase.EXIT):
+                worst = max(worst, abs(lat))
+            next_ctl += 0.01
+        sim.step(cmd.steer, cmd.accel, 0.001)
+        t += 0.001
+    assert [p for p, _ in ctl.log][:3] == ["brake", "turn_in", "hold"], ctl.log
+    assert worst < 4.0, worst
