@@ -33,12 +33,13 @@
 				     to 48 belongs to lanelet 73626 (641 m, half the ring), and a goal behind the car on its
 				     own lanelet is a loop Autoware's mission planner does not route (its trajectory is a
 				     stopped stub at the goal). Start on 123842 (x 48 to 19), goal on 73626: the route is the
-				     whole ring less 60 m. y is the lanelets' centre line. -->
+				     whole ring less 60 m. y is the lanelets' centre line in Autoware's map frame (the
+				     TransverseMercator of the nodes' lat/lon, which is also the simulator's). -->
 				<Private entityRef="ego">
 					<PrivateAction>
 						<TeleportAction>
 							<Position>
-								<WorldPosition x="30.0" y="205.5" z="0.3" h="3.14159" p="0" r="0" />
+								<WorldPosition x="30.0" y="204.0" z="0.3" h="3.14159" p="0" r="0" />
 							</Position>
 						</TeleportAction>
 					</PrivateAction>
@@ -46,7 +47,7 @@
 						<RoutingAction>
 							<AcquirePositionAction>
 								<Position>
-									<WorldPosition x="90.0" y="205.5" z="0.0" h="3.14159" p="0" r="0" />
+									<WorldPosition x="90.0" y="204.1" z="0.0" h="3.14159" p="0" r="0" />
 								</Position>
 							</AcquirePositionAction>
 						</RoutingAction>
@@ -77,7 +78,7 @@
 											<EntityCondition>
 												<ReachPositionCondition tolerance="5.0">
 													<Position>
-														<WorldPosition x="90.0" y="205.5" z="0.0" h="3.14159" p="0" r="0" />
+														<WorldPosition x="90.0" y="204.1" z="0.0" h="3.14159" p="0" r="0" />
 													</Position>
 												</ReachPositionCondition>
 											</EntityCondition>
