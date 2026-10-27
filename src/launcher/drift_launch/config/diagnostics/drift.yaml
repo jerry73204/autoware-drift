@@ -3,7 +3,12 @@
 # autonomous mode while Autoware keeps every other check:
 #   - the control subgraph is this package's control.yaml (no AEB, lane departure or control
 #     state under /autoware/control);
-#   - trajectory_validation leaves out trajectory_shift (a drift line moves the trajectory);
+#   - trajectory_validation leaves out trajectory_shift (a drift line moves the trajectory) and
+#     lateral_acceleration: the smoother plans the ring's bends at up to 8 m/s^2 on purpose, and
+#     the validator, measuring curvature point to point, reads the lanelet map's joints in a 104 m
+#     bend as R 61 m, 12 m/s^2 against its 9.8 (lap 25). Its ERROR took planning away, so the MRM
+#     fell back from the comfortable stop to the emergency stop, which holds the last steering
+#     angle: the car braked straight into the bend's barrier at 20 m/s;
 #   - NDT's scan matching status counts only as an ERROR, not a WARN (lap 10 on server-241: six
 #     MRMs from "NDT exe time is too long", 105-147 ms against its 100 ms bound, NDT itself fine).
 # Passed to the ego stack as diagnostic_graph_path:= (autoware_sim_profile 77538e2).
@@ -167,7 +172,6 @@ units:
       - { type: link, link: /autoware/planning/trajectory_validation/interval }
       - { type: link, link: /autoware/planning/trajectory_validation/curvature }
       - { type: link, link: /autoware/planning/trajectory_validation/angle }
-      - { type: link, link: /autoware/planning/trajectory_validation/lateral_acceleration }
       - { type: link, link: /autoware/planning/trajectory_validation/acceleration }
       - { type: link, link: /autoware/planning/trajectory_validation/deceleration }
       - { type: link, link: /autoware/planning/trajectory_validation/steering }
