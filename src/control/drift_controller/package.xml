@@ -6,6 +6,7 @@
   <maintainer email="jerry73204@gmail.com">aeon</maintainer>
   <license>Apache-2.0</license>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>autoware_adapi_v1_msgs</exec_depend>
   <exec_depend>autoware_control_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <test_depend>python3-pytest</test_depend>

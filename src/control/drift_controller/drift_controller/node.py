@@ -11,6 +11,10 @@ The vehicle bridge takes the car's Control from the second topic (aib's ego conf
 What the law needs, from what Autoware already has:
 - pose and yaw: `/localization/kinematic_state` (the EKF);
 - yaw rate: the IMU (`/sensing/imu/imu_data`, Autoware's corrected one);
+- Autoware's emergency: `/api/fail_safe/mrm_state`. While an MRM runs no drift starts; one under
+  way is aborted to RECOVER (steering along the car's travel, so it does not spin under
+  braking), braking at least as hard as Autoware's command asks; after it, Autoware's own
+  command (its emergency stop) passes through.
 - speed and sideslip: the direction and length of the car's travel between consecutive NDT
   poses (`/localization/pose_estimator/pose_with_covariance`, 10 Hz) against its heading.
   The EKF's own twist has no lateral velocity: its model drives along the heading, so in a
@@ -24,6 +28,7 @@ import math
 
 import rclpy
 import yaml
+from autoware_adapi_v1_msgs.msg import MrmState
 from autoware_control_msgs.msg import Control
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
@@ -85,6 +90,8 @@ class DriftNode(Node):
                                  self.on_ndt, 10)
         self.create_subscription(Imu, "/sensing/imu/imu_data", self.on_imu,
                                  qos_profile_sensor_data)
+        self.create_subscription(MrmState, "/api/fail_safe/mrm_state", self.on_mrm, 10)
+        self.mrm = False
         self.create_timer(self.dt, self.tick)
         self.create_timer(1.0, self.report)
         self.autoware = None
@@ -110,6 +117,16 @@ class DriftNode(Node):
     def on_ndt(self, msg):
         t = msg.header.stamp.sec + 1e-9 * msg.header.stamp.nanosec
         self.travel.add(t, msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+    def on_mrm(self, msg):
+        mrm = msg.state not in (MrmState.UNKNOWN, MrmState.NORMAL)
+        if mrm and not self.mrm:
+            self.get_logger().warn(f"Autoware MRM (state {msg.state}, behavior {msg.behavior}): "
+                                   "no drift starts; one under way recovers")
+            if self.pose is not None:
+                self.law.abort(self.state(), "Autoware MRM")
+        self.mrm = mrm
+        self.law.armed = not mrm
 
     def on_imu(self, msg):
         self.yaw_rate = msg.angular_velocity.z
@@ -140,8 +157,11 @@ class DriftNode(Node):
         now = self.get_clock().now().to_msg()
         msg.stamp = msg.lateral.stamp = msg.longitudinal.stamp = now
         msg.lateral.steering_tire_angle = float(cmd.steer)
-        msg.longitudinal.acceleration = float(cmd.accel)
-        msg.longitudinal.velocity = float(s.speed + 10.0 if cmd.accel > 0 else 0.0)
+        accel = cmd.accel
+        if self.mrm and self.autoware is not None:  # brake at least as hard as Autoware asks
+            accel = min(accel, self.autoware.longitudinal.acceleration)
+        msg.longitudinal.acceleration = float(accel)
+        msg.longitudinal.velocity = float(s.speed + 10.0 if accel > 0 else 0.0)
         self.pub.publish(msg)
 
     def report(self, s=None):

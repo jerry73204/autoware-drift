@@ -82,3 +82,15 @@ def test_a_bend_reached_too_slowly_is_skipped_and_the_next_still_drifts():
     assert ctl.phase is Phase.CRUISE and ctl.log[-1][0] == "skipped"
     ctl.step(State(200.0, 0.0, 0.0, 27.8, 0.0, 0.0), 0.01)
     assert ctl.phase is Phase.BRAKE and ctl.active.name == "b"
+
+
+def test_an_mrm_aborts_a_drift_to_recover_and_arms_nothing():
+    ctl = DriftController([DriftPoint(10.0, 0.0, 100.0), DriftPoint(300.0, 0.0, 100.0)])
+    s = State(10.0, 0.0, 0.0, 27.8, -3.0, 0.3)
+    ctl.step(s, 0.01)
+    assert ctl.phase is Phase.BRAKE
+    ctl.abort(s, "Autoware MRM")
+    assert ctl.phase is Phase.RECOVER and ctl.log[-1][1] == "aborted: Autoware MRM"
+    ctl.phase, ctl.armed = Phase.CRUISE, False
+    ctl.step(State(300.0, 0.0, 0.0, 27.8, 0.0, 0.0), 0.01)
+    assert ctl.phase is Phase.CRUISE

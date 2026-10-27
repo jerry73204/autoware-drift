@@ -134,6 +134,7 @@ class DriftController:
     exit_beta0: float = 0.0
     hold_speed: float = 0.0
     log: list = field(default_factory=list)
+    armed: bool = True                  # False: no new drift starts (Autoware in an MRM)
 
     def _go(self, phase, s, why=""):
         self.log.append((phase.value, why))
@@ -142,6 +143,11 @@ class DriftController:
             self.yaw0, self.integral, self.hold_speed = s.yaw, 0.0, s.speed
         if phase is Phase.EXIT:
             self.exit_beta0 = s.beta
+
+    def abort(self, s, why):
+        """Leave a drift for RECOVER (Autoware's MRM, say); CRUISE and RECOVER stay."""
+        if self.phase not in (Phase.CRUISE, Phase.RECOVER):
+            self._go(Phase.RECOVER, s, f"aborted: {why}")
 
     def _sign(self):
         return 1.0 if self.active.radius > 0 else -1.0
@@ -159,7 +165,7 @@ class DriftController:
             self._go(Phase.RECOVER, s, f"sideslip {math.degrees(s.beta):.0f} deg")
         ph = self.phase
         if ph is Phase.CRUISE:
-            if self.points and (self.p.repeat or self.next_index < len(self.points)):
+            if self.armed and self.points and (self.p.repeat or self.next_index < len(self.points)):
                 w = self.points[self.next_index % len(self.points)]
                 if math.hypot(w.x - s.x, w.y - s.y) < p.trigger_distance:
                     self.next_index += 1
