@@ -44,11 +44,13 @@
     delta_yaw_threshold: 1.0472       # Allowed delta yaw between ego pose and trajectory pose [radian]
 
     # resampling parameters for optimization
-    max_trajectory_length: 300.0        # max trajectory length for resampling [m]. autoware-drift: 300, not 200,
-                                        # so the optimizer sees all of extract_ahead_dist: at 200 its own end (185 m
-                                        # ahead) was a stop, and that stop held the ring's ~104 m bend to 12-14 m/s
-                                        # (lap 20), not the lateral or steering-rate filter
-    min_trajectory_length: 180.0        # min trajectory length for resampling [m]
+    max_trajectory_length: 300.0        # max trajectory length for resampling [m]
+    min_trajectory_length: 300.0        # min trajectory length for resampling [m]. autoware-drift: 300, not 180,
+                                        # so the optimizer sees all of extract_ahead_dist. Past its dense part,
+                                        # resample.cpp ends the trajectory at min_trajectory_length, not max: at
+                                        # 180 the optimizer planned a stop 185 m ahead, and that receding stop
+                                        # held the car to 22 m/s on the ring and its 104 m bend to 12-14 m/s in
+                                        # the plan (laps 20 and 23), not the lateral or steering-rate filter
     resample_time: 2.0                  # resample total time for dense sampling [s]
     dense_resample_dt: 0.2              # resample time interval for dense sampling [s]
     dense_min_interval_distance: 0.1    # minimum points-interval length for dense sampling [m]
