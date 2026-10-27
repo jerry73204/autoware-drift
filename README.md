@@ -34,15 +34,20 @@ from it in swb's `autoware_sim_vehicle`, its Isaac rig and ego config
 just build
 # in scenario-world-bridge (this project's install as an overlay)
 D=$HOME/repos/autoware-drift
-just isaac-world ego:=$PWD/src/swb_isaac_world/deps/autoware_isaac_bridge/src/aib/config/ego_drift_mustang.yaml physics_hz:=240
+just isaac-world ego:=$PWD/src/swb_isaac_world/deps/autoware_isaac_bridge/src/aib/config/ego_drift_mustang.yaml
 just run sim:=isaac
 just ego-isaac overlay:=$D/install/setup.bash map_path:=$CARLA_MAPS/Town05 \
     vehicle_model:=drift_mustang sensor_model:=drift_mustang_sensor_kit max_velocity:=27.78 \
     velocity_smoother_param_path:=$D/install/drift_launch/share/drift_launch/config/velocity_smoother.param.yaml \
     extra_launch:=$D/install/drift_launch/share/drift_launch/launch/drift.launch.xml
 just scenario $D/install/drift_launch/share/drift_launch/scenarios/town05_ring_lap.xosc sim:=isaac \
-    vehicle_model:=drift_mustang frame_rate:=100   # a 10 ms step (swb 7b5a18a)
+    vehicle_model:=drift_mustang initialize_duration:=300
 ```
+
+Run at the default rates (60 Hz physics, SSv2's 20 Hz frames): at `physics_hz:=240` and
+`frame_rate:=100` the simulation ran at ~0.2x real time on server-241, and Autoware's wall-clock
+monitors never let it engage (lap 1-2, 2026-10-27); on the proving ground the drift was the same
+at both rates.
 
 `/drift/state` reports each drift (bend, phase, speed, sideslip, yaw rate); the vehicle takes
 its command from `/control/command/drift/control_cmd`, which the controller fills with
