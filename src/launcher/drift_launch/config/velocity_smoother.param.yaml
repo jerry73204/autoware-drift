@@ -38,7 +38,8 @@
     stopping_distance: 0.0    # distance for the stopping_velocity [m]. 0 means the stopping velocity is not applied.
 
     # path extraction parameters
-    extract_ahead_dist: 200.0         # forward trajectory distance used for planning [m]
+    extract_ahead_dist: 300.0         # forward trajectory distance used for planning [m]. autoware-drift: all of
+                                      # the behavior path's 300 m, so the stop the smoother plans at its end is as far as it can be
     extract_behind_dist: 5.0          # backward trajectory distance used for planning [m]
     delta_yaw_threshold: 1.0472       # Allowed delta yaw between ego pose and trajectory pose [radian]
 

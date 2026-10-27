@@ -10,14 +10,16 @@
 
     # constraints param for normal driving
     normal:
-      min_acc: -1.0         # min deceleration [m/ss]
+      min_acc: -3.0         # min deceleration [m/ss]. autoware-drift: the smoother plans a stop at its
+                            # look-ahead's end (300 m); at -1.0 that held the car to sqrt(2 x 1 x ~150) = 17 m/s
+                            # (lap 13); at -3.0 the ring's 29 m/s needs 140 m
       max_acc: 3.0          # max acceleration [m/ss]
-      min_jerk: -2.0        # min jerk [m/sss]
+      min_jerk: -3.0        # min jerk [m/sss]
       max_jerk: 2.0         # max jerk [m/sss]
 
     # constraints to be observed
     limit:
-      min_acc: -2.5         # min deceleration limit [m/ss]
+      min_acc: -4.0         # min deceleration limit [m/ss]
       max_acc: 4.0          # max acceleration limit [m/ss]
-      min_jerk: -3.0        # min jerk limit [m/sss]
+      min_jerk: -4.0        # min jerk limit [m/sss]
       max_jerk: 3.0         # max jerk limit [m/sss]
