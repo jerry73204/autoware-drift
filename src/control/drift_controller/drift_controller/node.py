@@ -16,8 +16,11 @@ What the law needs, from what Autoware already has:
   (the law's REJOIN), so Autoware takes the car back within its transition manager's limits.
 - Autoware's emergency: `/api/fail_safe/mrm_state`. While an MRM runs no drift starts; one under
   way is aborted to RECOVER (steering along the car's travel, so it does not spin under
-  braking), braking at least as hard as Autoware's command asks; after it, Autoware's own
-  command (its emergency stop) passes through.
+  braking), braking at least as hard as Autoware's command asks. After it Autoware's emergency
+  stop keeps its braking but not its steering: Autoware holds the wheel where it was, which on
+  the ring is straight off a bend at speed (lap 25, server-241: into the barrier at 20 m/s). So
+  above MRM_STEER_SPEED the node steers along Autoware's last trajectory (REJOIN's pursuit)
+  with Autoware's acceleration, and passes Autoware's command through once slower.
 - speed, sideslip and yaw rate (`state_source`):
   - `velocity_report` (default): the vehicle's body velocity and yaw rate,
     `/vehicle/status/velocity_status` (longitudinal, lateral, heading rate), the grade of state
@@ -83,6 +86,10 @@ def path_errors(points, x, y, yaw, speed):
     return lat, head, steer, pv
 
 
+MRM_STEER_SPEED = 2.0  # m/s: below it an emergency stop steers as Autoware does
+K_PURSUIT_YAW = 0.1    # rad per rad/s, as the law's k_rejoin_damp
+
+
 class TravelEstimate:
     """Speed and course from consecutive scan-matched poses."""
 
@@ -134,6 +141,7 @@ class DriftNode(Node):
                                  self.on_trajectory, 1)
         self.trajectory = []
         self.mrm = False
+        self.mrm_steering = False   # the node steering Autoware's emergency stop
         self.create_timer(self.dt, self.tick)
         self.create_timer(1.0, self.report)
         self.autoware = None
@@ -148,7 +156,7 @@ class DriftNode(Node):
 
     def on_autoware(self, msg):
         self.autoware = msg
-        if not self.law_overrides():
+        if not self.law_overrides() and not self.mrm_steering:
             self.pub.publish(msg)
 
     def on_odom(self, msg):
@@ -208,14 +216,24 @@ class DriftNode(Node):
             self.last_phase = self.law.phase
             self.report(s)
         if not cmd.override:
+            self.mrm_steering = (self.mrm and self.autoware is not None
+                                 and s.path_steer is not None and s.speed > MRM_STEER_SPEED)
+            if self.mrm_steering:
+                r_path = s.speed * math.tan(s.path_steer) / WHEEL_BASE
+                steer = s.path_steer - K_PURSUIT_YAW * (s.r - r_path)
+                self.publish(s, steer, self.autoware.longitudinal.acceleration)
             return
-        msg = Control()
-        now = self.get_clock().now().to_msg()
-        msg.stamp = msg.lateral.stamp = msg.longitudinal.stamp = now
-        msg.lateral.steering_tire_angle = float(cmd.steer)
+        self.mrm_steering = False
         accel = cmd.accel
         if self.mrm and self.autoware is not None:  # brake at least as hard as Autoware asks
             accel = min(accel, self.autoware.longitudinal.acceleration)
+        self.publish(s, cmd.steer, accel)
+
+    def publish(self, s, steer, accel):
+        msg = Control()
+        now = self.get_clock().now().to_msg()
+        msg.stamp = msg.lateral.stamp = msg.longitudinal.stamp = now
+        msg.lateral.steering_tire_angle = float(steer)
         msg.longitudinal.acceleration = float(accel)
         msg.longitudinal.velocity = float(s.speed + 10.0 if accel > 0 else 0.0)
         self.pub.publish(msg)
