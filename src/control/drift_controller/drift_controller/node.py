@@ -18,10 +18,15 @@ What the law needs, from what Autoware already has:
   way is aborted to RECOVER (steering along the car's travel, so it does not spin under
   braking), braking at least as hard as Autoware's command asks; after it, Autoware's own
   command (its emergency stop) passes through.
-- speed and sideslip: the direction and length of the car's travel between consecutive NDT
-  poses (`/localization/pose_estimator/pose_with_covariance`, 10 Hz) against its heading.
-  The EKF's own twist has no lateral velocity: its model drives along the heading, so in a
-  drift its velocity says sideslip 0. NDT's poses are scan matches, independent of that.
+- speed, sideslip and yaw rate (`state_source`):
+  - `velocity_report` (default): the vehicle's body velocity and yaw rate,
+    `/vehicle/status/velocity_status` (longitudinal, lateral, heading rate), the grade of state
+    the drifting cars of Stanford and TRI had from their INS. On Isaac it is the simulator's,
+    every frame, with no lag. Lap 19 (server-241) oscillated into a barrier on the NDT source:
+  - `ndt`: the direction and length of the car's travel between consecutive NDT poses
+    (`/localization/pose_estimator/pose_with_covariance`, 10 Hz) against its heading, the yaw
+    rate from the IMU. 0.1 s apart and as late as the scans' stamps (0.13 s on lap 19). The
+    EKF's own twist has no lateral velocity: its model drives along the heading.
 
 The law (`law.py`) runs on a timer at `rate_hz` with the latest state; outside a drift the node
 forwards Autoware's command as it arrives.
@@ -35,6 +40,7 @@ from autoware_adapi_v1_msgs.msg import MrmState
 from autoware_control_msgs.msg import Control
 from autoware_planning_msgs.msg import Trajectory
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from autoware_vehicle_msgs.msg import VelocityReport
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -101,6 +107,9 @@ class DriftNode(Node):
         super().__init__("drift_controller")
         points_file = self.declare_parameter("points_file", "").value
         rate = self.declare_parameter("rate_hz", 100.0).value
+        self.source = self.declare_parameter("state_source", "velocity_report").value
+        if self.source not in ("velocity_report", "ndt"):
+            raise ValueError(f"state_source {self.source!r}: velocity_report or ndt")
         overrides = json.loads(self.declare_parameter("params", "").value or "{}")
         overrides.setdefault("repeat", self.declare_parameter("repeat", True).value)
         self.points = load_points(points_file) if points_file else []
@@ -118,6 +127,9 @@ class DriftNode(Node):
         self.create_subscription(Imu, "/sensing/imu/imu_data", self.on_imu,
                                  qos_profile_sensor_data)
         self.create_subscription(MrmState, "/api/fail_safe/mrm_state", self.on_mrm, 10)
+        self.create_subscription(VelocityReport, "/vehicle/status/velocity_status",
+                                 self.on_velocity, 10)
+        self.report = None   # (vx, vy, yaw rate)
         self.create_subscription(Trajectory, "/planning/scenario_planning/trajectory",
                                  self.on_trajectory, 1)
         self.trajectory = []
@@ -132,7 +144,7 @@ class DriftNode(Node):
         self.last_phase = self.law.phase
         self.last_cmd = None
         self.get_logger().info(f"{len(self.points)} drift point(s) from {points_file or '-'}, "
-                               f"law at {rate:.0f} Hz")
+                               f"law at {rate:.0f} Hz, state from {self.source}")
 
     def on_autoware(self, msg):
         self.autoware = msg
@@ -162,6 +174,9 @@ class DriftNode(Node):
         self.trajectory = [(p.pose.position.x, p.pose.position.y, yaw_of(p.pose.orientation),
                             p.longitudinal_velocity_mps) for p in msg.points]
 
+    def on_velocity(self, msg):
+        self.report = (msg.longitudinal_velocity, msg.lateral_velocity, msg.heading_rate)
+
     def on_imu(self, msg):
         self.yaw_rate = msg.angular_velocity.z
 
@@ -170,6 +185,11 @@ class DriftNode(Node):
 
     def state(self):
         x, y, yaw = self.pose
+        if self.source == "velocity_report" and self.report is not None:
+            vx, vy, r = self.report
+            speed = math.hypot(vx, vy)
+            lat, head, steer, pv = path_errors(self.trajectory, x, y, yaw, speed)
+            return State(x, y, yaw, vx, vy, r, lat, head, steer, pv)
         speed = self.travel.speed if self.travel.course is not None else self.ekf_speed
         beta = 0.0
         if self.travel.course is not None:

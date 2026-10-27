@@ -10,11 +10,14 @@
   <arg name="repeat" default="true" description="true: the points again after the last (laps)"/>
   <arg name="rate_hz" default="100.0"/>
   <arg name="params" default="" description="JSON: law.Params overrides by name; empty: none"/>
+  <arg name="state_source" default="velocity_report"
+       description="velocity_report (the vehicle's body velocity and yaw rate) or ndt (NDT pose differences, the IMU)"/>
   <node pkg="drift_controller" exec="drift_controller" name="drift_controller" output="screen">
     <param name="use_sim_time" value="true"/>
     <param name="points_file" value="$(var points_file)"/>
     <param name="rate_hz" value="$(var rate_hz)"/>
     <param name="repeat" value="$(var repeat)"/>
     <param name="params" value="$(var params)"/>
+    <param name="state_source" value="$(var state_source)"/>
   </node>
 </launch>
