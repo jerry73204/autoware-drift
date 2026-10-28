@@ -1,0 +1,13 @@
+[project]
+name = "race_planner"
+version = "0.1.0"
+description = "Offline minimum-time trajectory planner for any track and car (autoware-drift race stack)"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "scipy>=1.11", "casadi>=3.6", "pyyaml>=6", "matplotlib>=3.8"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

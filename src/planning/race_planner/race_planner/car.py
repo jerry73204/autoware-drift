@@ -1,0 +1,74 @@
+"""The car as the planner models it, read from sim_vehicle_spec's `vehicles/<car>.yaml` (spec v2).
+
+Only what the spec says goes in; nothing is per track. Derived quantities:
+
+- lf, lr: CoM to the front and rear axle (wheel_base split by com_front_fraction).
+- Iz: yaw inertia of the spec's inertia box (length x width), m (l^2 + w^2) / 12.
+- axle_torque_max: at the drive axle; `ev`: the motor's peak torque through its gear (to base
+  speed, then power_max, the motor's peak power); `ideal`: max_drive_torque per driven wheel.
+- brake_torque_max: per wheel.
+- drag: 1/2 rho Cd A (N per (m/s)^2); roll: the rolling coefficient.
+- The tyre: `mu` (the spec's friction, relative to the reference surface: a surface's mu is
+  this times its class's over the reference's, see track.SurfaceTable), PhysX's stiffnesses
+  (lateral: lat_stiff_value N/rad per N of rest load, up to lat_stiff_max_load rest loads;
+  longitudinal: long_stiff_value per g) and its friction-vs-slip curve. How these become a
+  tyre model is model.py's business.
+"""
+from dataclasses import dataclass
+
+import yaml
+
+
+@dataclass
+class Car:
+    name: str
+    m: float
+    Iz: float
+    lf: float
+    lr: float
+    h_cg: float
+    track: float
+    r_wheel: float
+    steer_max: float
+    mu: float
+    lat_stiff_max_load: float
+    lat_stiff_value: float
+    long_stiff_value: float
+    friction_vs_slip: list
+    axle_torque_max: float
+    power_max: float
+    brake_torque_max: float
+    drag: float
+    roll: float
+    diff: str
+    drive_axle: str
+
+    @property
+    def wheel_base(self):
+        return self.lf + self.lr
+
+    @classmethod
+    def from_spec(cls, path):
+        d = yaml.safe_load(open(path))
+        g, i, t, p = d["geometry"], d["inertia"], d["tires"], d["powertrain"]
+        wb = g["wheel_base"]
+        lf = wb * (1.0 - i["com_front_fraction"])
+        l, w = i["inertia_box"][0], i["inertia_box"][1]
+        if p["model"] == "ideal":  # `ideal`'s cap is per wheel (spec-format.md)
+            n_driven = 4 if p["drive_axle"] == "all" else 2
+            axle = n_driven * float(p["max_drive_torque"])
+        else:  # `ev`: the motor's envelope through its single gear
+            axle = p["motor_peak_torque"] * p["gear_ratio"]
+        r = d["resistance"]
+        return cls(
+            name=d["name"], m=float(i["mass"]), Iz=float(i["mass"]) * (l * l + w * w) / 12.0,
+            lf=lf, lr=wb - lf, h_cg=float(i["com_height"]), track=float(g["wheel_tread"]),
+            r_wheel=float(g["wheel_radius"]), steer_max=float(g["max_steer_angle"]),
+            mu=float(t["friction"]), lat_stiff_max_load=float(t["lat_stiff_max_load"]),
+            lat_stiff_value=float(t["lat_stiff_value"]), long_stiff_value=float(t["long_stiff_value"]),
+            friction_vs_slip=[list(map(float, q)) for q in t["friction_vs_slip"]],
+            axle_torque_max=float(axle), power_max=float(p["motor_peak_power"]),
+            brake_torque_max=float(d["brakes"]["max_brake_torque"]),
+            drag=0.5 * r["air_density"] * r["drag_coefficient"] * r["frontal_area"],
+            roll=float(r["rolling_coefficient"]),
+            diff=p.get("differential", {}).get("type", "open"), drive_axle=p["drive_axle"])
