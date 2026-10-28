@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""A lap's proof video: the dash camera, a bird's-eye view of the ring, the drift's numbers and
-the localization against the simulator's truth, one 1920x1080 frame per simulated frame.
+"""A lap's proof video: a camera that follows the car, a bird's-eye view of the ring, the drift's
+numbers and the localization against the simulator's truth, one 1920x1080 frame per simulated
+frame.
 
     tools/lap_video.py <record dir>/<time>-<ego> <bag dir> <lanelet2_map.osm> [out.mp4]
-        [--title S] [--from T] [--to T] [--fps 20]
+        [--title S] [--from T] [--to T] [--fps 20] [--camera chase|dash|course]
 
-The record directory is swb_isaac_world's (`just isaac-world record:=<dir>`): dash/*.jpg and
-state.jsonl, the simulator's truth for the ego every frame. The bag is the lap script's
+The record directory is swb_isaac_world's (`just isaac-world record:=<dir>`): <camera>/*.jpg and
+state.jsonl, the simulator's truth for the ego every frame, each wheel's slip and slip angle
+among it. The slide is drawn from those: on the camera, a car seen from above whose tires go from
+green (gripping) to red (sliding) with its velocity against its heading (the sideslip); in the
+bird's-eye inset, a skid mark wherever a tire slides, kept for the rest of the lap. The bag is the lap script's
 (rosbag2, mcap) on the ego's domain: /localization/kinematic_state (the EKF),
 /localization/pose_estimator/pose_with_covariance (NDT) and its NVTL,
 /vehicle/status/velocity_status, /drift/state, the control commands, /api/operation_mode/state,
@@ -36,6 +40,60 @@ PHASE_COLOR = {"cruise": (120, 200, 120), "brake": (255, 150, 60), "turn_in": (2
                "hold": (255, 60, 60), "exit": (200, 120, 255), "recover": (90, 200, 255),
                "rejoin": (180, 180, 80)}
 _fonts = {}
+# drift_mustang's wheels in base_link (the rear axle at x 0), aib's order: FL, FR, RL, RR
+WHEEL_BASE, TRACK = 2.886, 1.586
+WHEEL_XY = ((WHEEL_BASE, TRACK / 2), (WHEEL_BASE, -TRACK / 2), (0.0, TRACK / 2), (0.0, -TRACK / 2))
+# a tire slides when its slip ratio or slip angle is past roughly its peak's
+SLIP_FULL, ANGLE_FULL = 0.15, 8.0
+SKID = (12, 12, 12)
+
+
+def slide(w):
+    """0 for a tire well inside its grip, 1 for one at or past its peak."""
+    return min(1.0, math.hypot(w.get("slip", 0.0) / SLIP_FULL, w.get("slip_angle_deg", 0.0) / ANGLE_FULL))
+
+
+def slide_color(k):
+    """Green to yellow to red."""
+    if k < 0.5:
+        return (int(80 + 350 * k), 210, 80)
+    return (255, int(210 - 340 * (k - 0.5)), 60)
+
+
+def wheel_world(r, lx, ly):
+    yaw = math.radians(r["yaw_deg"])
+    return (r["x"] + lx * math.cos(yaw) - ly * math.sin(yaw), r["y"] + lx * math.sin(yaw) + ly * math.cos(yaw))
+
+
+def slide_hud(d, x0, y0, r, beta_deg):
+    """A car from above, nose up, its tires coloured by how much they slide, and its velocity's
+    direction against its heading."""
+    w, h = 230, 250
+    d.rectangle((x0, y0, x0 + w, y0 + h), fill=(0, 0, 0))
+    d.text((x0 + 8, y0 + 6), "tires: grip -> slide", fill=FG, font=font(14))
+    cx, cy, s = x0 + w / 2, y0 + 140, 26.0  # the car's middle, px per m
+    mid = WHEEL_BASE / 2
+    P = lambda lx, ly: (cx - ly * s, cy - (lx - mid) * s)
+    body = [P(3.72, 0.95), P(3.72, -0.95), P(-1.0, -0.95), P(-1.0, 0.95)]
+    d.polygon(body, outline=FG, width=2)
+    for (lx, ly), wh in zip(WHEEL_XY, r["wheels"]):
+        k = slide(wh)
+        steer = r["tire_angle"] if lx > 0 else 0.0
+        a, b = math.cos(steer), math.sin(steer)
+        hl, hw = 0.33, 0.12
+        pts = [P(lx + dx * a - dy * b, ly + dx * b + dy * a) for dx, dy in ((hl, hw), (hl, -hw), (-hl, -hw), (-hl, hw))]
+        d.polygon(pts, fill=slide_color(k))
+    # the velocity: the car slides when it points away from the nose
+    beta = math.radians(beta_deg)
+    L = 3.2
+    tip = P(mid + L * math.cos(beta), L * math.sin(beta))
+    d.line([P(mid, 0), tip], fill=ACCENT, width=4)
+    d.ellipse((tip[0] - 5, tip[1] - 5, tip[0] + 5, tip[1] + 5), fill=ACCENT)
+    d.line([P(mid, 0), P(mid + L, 0)], fill=DIM, width=1)
+    color = BAD if abs(beta_deg) > 4 else FG
+    d.text((x0 + 8, y0 + h - 26), f"sideslip {beta_deg:+5.1f} deg", fill=color, font=font(18, True))
+    if any(slide(wh) > 0.8 for wh in r["wheels"][2:]):
+        d.text((x0 + 8, y0 + 26), "REAR SLIDING", fill=BAD, font=font(16, True))
 
 
 def font(size, bold=False):
@@ -173,7 +231,7 @@ class Bev:
                                y + lx * math.sin(yaw) + ly * math.cos(yaw), c, s))
         d.polygon(pts, outline=color, width=2)
 
-    def draw(self, trail, now_truth, ekf, ndt, phase):
+    def draw(self, trail, now_truth, ekf, ndt, phase, skids=(), beta_deg=0.0):
         img = self.base.copy()
         d = ImageDraw.Draw(img)
         for (a, b, ph) in trail:
@@ -189,8 +247,11 @@ class Bev:
         for pts in self.lines:
             if any(abs(X - x) < 60 and abs(Y - y) < 60 for X, Y in pts):
                 di.line([ip(X, Y) for X, Y in pts], fill=GRID, width=1)
+        for (a, b, k) in skids:
+            if abs(a[0] - x) < 60 and abs(a[1] - y) < 60:
+                di.line([ip(*a), ip(*b)], fill=tuple(int(c * (0.4 + 0.6 * k)) for c in (255, 120, 90)), width=3)
         for (a, b, ph) in trail[-400:]:
-            di.line([ip(*a), ip(*b)], fill=PHASE_COLOR.get(ph, FG), width=2)
+            di.line([ip(*a), ip(*b)], fill=PHASE_COLOR.get(ph, FG), width=1)
         yaw = math.radians(now_truth["yaw_deg"])
 
         def box(X, Y, Yaw, color):
@@ -201,6 +262,11 @@ class Bev:
             di.polygon(pts, outline=color, width=2)
 
         box(x, y, yaw, TRUTH)
+        course = yaw + math.radians(beta_deg)  # the velocity's direction
+        sp = max(now_truth["speed"], 0.0)
+        a0 = ip(x + 1.4 * math.cos(yaw), y + 1.4 * math.sin(yaw))
+        a1 = ip(x + 1.4 * math.cos(yaw) + 0.4 * sp * math.cos(course), y + 1.4 * math.sin(yaw) + 0.4 * sp * math.sin(course))
+        di.line([a0, a1], fill=ACCENT, width=3)
         if ekf:
             box(ekf[0], ekf[1], ekf[3], EKF)
         if ndt:
@@ -210,9 +276,9 @@ class Bev:
         img.paste(inset, (W - iw - 10, H - ih - 10))
         d.text((12, 8), "bird's-eye view", fill=DIM, font=font(16))
         d.text((12, 30), f"phase: {phase}", fill=PHASE_COLOR.get(phase, FG), font=font(20, True))
-        d.text((W - iw - 10, H - ih - 32), "70 m around the car:  ", fill=DIM, font=font(14))
-        lx = W - iw - 10 + 200
-        for label, color in (("truth", TRUTH), ("EKF", EKF), ("NDT", NDT)):
+        d.text((W - iw - 10, H - ih - 32), "70 m around:", fill=DIM, font=font(14))
+        lx = W - iw - 10 + 110
+        for label, color in (("truth", TRUTH), ("EKF", EKF), ("NDT", NDT), ("skid", (255, 120, 90))):
             d.text((lx, H - ih - 32), label, fill=color, font=font(14, True))
             lx += 60
         return img
@@ -249,6 +315,7 @@ def main():
     ap.add_argument("--to", dest="t_to", type=float, default=None)
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--note", default="", help="a line under the localization panel's title")
+    ap.add_argument("--camera", default="chase", help="the recorder's camera for the main panel: chase, dash or course")
     a = ap.parse_args()
 
     import yaml
@@ -271,6 +338,16 @@ def main():
     bev = Bev(lines, truth, points)
 
     tt = [t for t, _ in truth]
+    # the true sideslip: the course against the heading over +-2 frames (the truth has no velocity
+    # vector), positive with the velocity left of the nose, as the controller's estimate
+    sideslip = []
+    for j, (_, r) in enumerate(truth):
+        p, q = truth[max(0, j - 2)][1], truth[min(len(truth) - 1, j + 2)][1]
+        if r["speed"] > 2.0 and math.dist((p["x"], p["y"]), (q["x"], q["y"])) > 0.2:
+            course = math.degrees(math.atan2(q["y"] - p["y"], q["x"] - p["x"]))
+            sideslip.append((course - r["yaw_deg"] + 180.0) % 360.0 - 180.0)
+        else:
+            sideslip.append(0.0)
 
     def truth_at(ts):
         """The simulator's (x, y) at simulated time ts, interpolated between frames."""
@@ -295,6 +372,7 @@ def main():
                            "-pix_fmt", "yuv420p", "-crf", "20", "-preset", "veryfast", a.out],
                           stdin=subprocess.PIPE)
     trail, last_xy = [], None
+    skids, last_wheels = [], None
     tz, ez = Series(), Series()
     beta_true, beta_est, yawr, spd = Series(), Series(), Series(), Series()
     for i, (t, r) in enumerate(truth):
@@ -306,6 +384,14 @@ def main():
             last_xy = xy
         elif last_xy is None:
             last_xy = xy
+        wheels = [wheel_world(r, lx, ly) for lx, ly in WHEEL_XY]
+        if last_wheels is not None:
+            for wp, wq, wh in zip(last_wheels, wheels, r["wheels"]):
+                k = slide(wh)
+                if k > 0.6 and math.dist(wp, wq) < 3.0:
+                    skids.append((wp, wq, k))
+        last_wheels = wheels
+        beta_now = sideslip[i]
         ekf, ndt = b["ekf"].at(t), b["ndt"].at(t)
         vel = b["vel"].at(t)
         if ekf:
@@ -313,22 +399,23 @@ def main():
         tz.add(t, r["z"])
         if vel:
             spd.add(t, vel[0] * 3.6)
-            beta_true.add(t, math.degrees(math.atan2(vel[1], max(abs(vel[0]), 0.5))) if abs(vel[0]) > 1 else 0.0)
             yawr.add(t, vel[2])
+        beta_true.add(t, beta_now)
         beta_est.add(t, st.get("beta_deg"))
 
         frame = Image.new("RGB", (2 * W, 2 * H), BG)
-        # dash camera
-        jpg = os.path.join(a.record, "dash", f"{r['frame']:06d}.jpg")
+        # the camera
+        jpg = os.path.join(a.record, a.camera, f"{r['frame']:06d}.jpg")
         if os.path.exists(jpg):
             frame.paste(Image.open(jpg).convert("RGB").resize((W, H)), (0, 0))
         d = ImageDraw.Draw(frame)
         d.rectangle((0, 0, 12 + 11 * len(a.title), 34), fill=(0, 0, 0))
         d.text((10, 6), a.title, fill=FG, font=font(18, True))
-        d.rectangle((0, H - 34, 420, H), fill=(0, 0, 0))
-        d.text((10, H - 30), f"dash camera   t = {t:7.2f} s (simulated)", fill=FG, font=font(16))
+        d.rectangle((0, H - 34, 440, H), fill=(0, 0, 0))
+        d.text((10, H - 30), f"{a.camera} camera   t = {t:7.2f} s (simulated)", fill=FG, font=font(16))
+        slide_hud(d, W - 240, H - 260, r, beta_now)
         # bird's-eye view
-        frame.paste(bev.draw(trail, r, ekf, ndt, phase), (W, 0))
+        frame.paste(bev.draw(trail, r, ekf, ndt, phase, skids, beta_now), (W, 0))
         # stats
         sp = Image.new("RGB", (W, H), PANEL)
         ds = ImageDraw.Draw(sp)
