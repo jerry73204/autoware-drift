@@ -19,7 +19,8 @@ import yaml
 
 @dataclass
 class SurfaceTable:
-    """swb's surface classes: each class's peak mu, relative to the reference class's."""
+    """swb's surface classes: each class's peak mu, an absolute coefficient at tyre friction 1.0
+    (the reference class's was measured on the PhysX rig: dry asphalt 1.12)."""
     reference: str
     mu_of: dict
 
@@ -29,9 +30,9 @@ class SurfaceTable:
         return cls(d["reference"], {k: float(v["mu"]) for k, v in d["classes"].items()})
 
     def mu(self, cls_name, car):
-        """A wheel of `car` on `cls_name`: on the reference class the tyre keeps the spec's own
-        friction; elsewhere it is scaled by the class's mu over the reference's (swb's rule)."""
-        return car.mu * self.mu_of[cls_name] / self.mu_of[self.reference]
+        """A wheel of `car` on `cls_name`: the class's mu times the tyre's friction (swb's surface
+        layer; checked on Isaac's sweeps of drift_mustang, see test_model)."""
+        return car.mu * self.mu_of[cls_name]
 
 
 @dataclass

@@ -34,9 +34,9 @@ def test_car_reads_the_spec():
 def test_surface_mu_is_the_tire_friction_scaled_by_the_class():
     table = SurfaceTable.from_yaml(CLASSES)
     car = Car.from_spec(SPEC)
-    assert table.mu("asphalt", car) == pytest.approx(1.0)        # the reference class: the tire's own
+    assert table.mu("asphalt", car) == pytest.approx(1.12)       # absolute, at tyre friction 1.0
     for low in ("ice", "snow_packed", "gravel", "grass"):  # the classes as swb has them
-        assert 0.1 < table.mu(low, car) < 0.6, low
+        assert 0.1 < table.mu(low, car) < 0.65, low
 
 
 @pytest.mark.skipif(not os.path.isdir(HARUNA), reason="Haruna's course data is not here")
@@ -48,7 +48,7 @@ def test_haruna_from_the_course_generator():
     assert np.all(np.diff(t.s) > 0)
     assert 1.0 / np.max(np.abs(t.kappa)) == pytest.approx(9.2, abs=1.0)   # H1's apex, R 9.2
     assert np.allclose(t.w_left, 4.0) and np.allclose(t.w_right, 4.0)
-    assert np.allclose(t.mu, 1.0)                                         # asphalt everywhere
+    assert np.allclose(t.mu, 1.12)                                        # asphalt everywhere
     assert -0.09 < np.min(t.grade) < -0.06                               # downhill, ~8 % at worst
     # heading and curvature agree: the heading's change is the curvature's integral
     turn = np.trapezoid(t.kappa, t.s)
