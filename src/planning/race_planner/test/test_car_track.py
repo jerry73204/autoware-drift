@@ -19,6 +19,7 @@ def test_car_reads_the_spec():
     assert car.name == "drift_mustang"
     assert car.m == 1450.0
     assert car.lf == pytest.approx(1.443) and car.lr == pytest.approx(1.443)
+    assert car.width == pytest.approx(1.586 + 2 * 0.1545)
     assert car.h_cg == 0.48 and car.track == 1.586 and car.r_wheel == 0.32
     assert car.steer_max == pytest.approx(1.01)
     assert car.diff == "locked" and car.drive_axle == "rear"

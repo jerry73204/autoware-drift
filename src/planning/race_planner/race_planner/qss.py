@@ -97,3 +97,9 @@ def braking_points(track, v, min_drop=0.5):
             i = j
         i += 1
     return out
+
+
+def lap_time(track, v):
+    """The time to drive `track` at v(s): each step at its two ends' mean speed."""
+    ds = np.diff(track.s)
+    return float(np.sum(2.0 * ds / np.maximum(v[1:] + v[:-1], 1e-6)))

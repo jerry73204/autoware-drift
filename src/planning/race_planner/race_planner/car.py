@@ -6,6 +6,7 @@ Only what the spec says goes in; nothing is per track. Derived quantities:
 - Iz: yaw inertia of the spec's inertia box (length x width), m (l^2 + w^2) / 12.
 - axle_torque_max: at the drive axle; `ev`: the motor's peak torque through its gear (to base
   speed, then power_max, the motor's peak power); `ideal`: max_drive_torque per driven wheel.
+- width: the body's, wheel_tread plus the side overhangs (sim_vehicle_spec's rule).
 - brake_torque_max: per wheel.
 - drag: 1/2 rho Cd A (N per (m/s)^2); roll: the rolling coefficient.
 - The tyre: `mu` (the spec's friction, relative to the reference surface: a surface's mu is
@@ -28,6 +29,7 @@ class Car:
     lr: float
     h_cg: float
     track: float
+    width: float
     r_wheel: float
     steer_max: float
     mu: float
@@ -63,6 +65,7 @@ class Car:
         return cls(
             name=d["name"], m=float(i["mass"]), Iz=float(i["mass"]) * (l * l + w * w) / 12.0,
             lf=lf, lr=wb - lf, h_cg=float(i["com_height"]), track=float(g["wheel_tread"]),
+            width=float(g["wheel_tread"] + g["left_overhang"] + g["right_overhang"]),
             r_wheel=float(g["wheel_radius"]), steer_max=float(g["max_steer_angle"]),
             mu=float(t["friction"]), lat_stiff_max_load=float(t["lat_stiff_max_load"]),
             lat_stiff_value=float(t["lat_stiff_value"]), long_stiff_value=float(t["long_stiff_value"]),
