@@ -64,6 +64,32 @@ def test_a_90_degree_bend_ends_its_hold_short_of_the_turn():
     assert 55 < held < 75, held   # 90 deg less the exit's 20, from where the hold began
 
 
+def test_turn_from_point_counts_the_bend_from_the_drift_point():
+    """A hairpin's turn counts from the drift point (the arc's start), not from where the hold
+    began: brake and turn-in already turn the car, and on a 10 m hairpin that is 20-25 deg the
+    hold would otherwise turn on top of the bend (Haruna H1, 2026-10-29)."""
+    sim = Sim(vx=27.8)
+    ctl = DriftController([DriftPoint(60.0, 0.0, 104.0, "bend", math.radians(90))],
+                          Params(turn_from_point=True))
+    dt, t, next_ctl, cmd, yaw_at = 0.001, 0.0, 0.0, None, {}
+    while t < 16.0:
+        if t >= next_ctl:
+            s = State(sim.x, sim.y, sim.yaw, sim.vx, sim.vy, sim.r)
+            cmd = ctl.step(s, 0.01)
+            if not cmd.override:
+                cmd.steer = s.beta + 1.35 * s.r / max(s.speed, 1.0)
+                cmd.accel = 27.8 - s.speed
+            yaw_at.setdefault(ctl.phase, s.yaw)
+            next_ctl += 0.01
+        sim.step(cmd.steer, cmd.accel, dt)
+        t += dt
+    assert [p for p, _ in ctl.log][:4] == ["brake", "turn_in", "hold", "exit"], ctl.log
+    from_point = math.degrees(yaw_at[Phase.EXIT] - yaw_at[Phase.BRAKE])
+    assert 66 < from_point < 74, from_point   # 90 less the exit's 20, from the point
+    from_hold = math.degrees(yaw_at[Phase.EXIT] - yaw_at[Phase.HOLD])
+    assert from_hold < from_point - 2, (from_hold, from_point)
+
+
 def test_repeat_takes_the_points_again():
     ctl = DriftController([DriftPoint(10.0, 0.0, 100.0)], Params(repeat=True))
     far = State(500.0, 500.0, 0.0, 27.8, 0.0, 0.0)

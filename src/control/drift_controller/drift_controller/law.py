@@ -87,6 +87,9 @@ class Params:
     hold_time: float = 6.0              # s
     hold_angle: float = math.radians(170)        # heading change in the drift, unless the point gives its bend
     exit_lead: float = math.radians(20)          # a bend's hold ends this short of its turn, for the exit
+    turn_from_point: bool = False       # count the bend's turn from the drift point (the arc's
+                                        # start), not from the hold's start: brake and turn-in
+                                        # already turn the car 20-25 deg into a 10 m hairpin
     k_beta: float = 1.5
     k_r: float = 1.0                    # rad per rad/s
     # The hold's line: the yaw-rate target v / R less this much per m of lateral error to
@@ -168,6 +171,7 @@ class DriftController:
     active: DriftPoint = None
     next_index: int = 0
     yaw0: float = 0.0
+    yaw_point: float = 0.0              # the heading at the drift point (BRAKE)
     integral: float = 0.0
     exit_beta0: float = 0.0
     hold_speed: float = 0.0
@@ -178,6 +182,8 @@ class DriftController:
     def _go(self, phase, s, why=""):
         self.log.append((phase.value, why))
         self.phase, self.t_phase = phase, 0.0
+        if phase is Phase.BRAKE:
+            self.yaw_point = s.yaw
         if phase is Phase.HOLD:
             self.yaw0, self.integral, self.hold_speed = s.yaw, 0.0, s.speed
         if phase is Phase.EXIT:
@@ -265,7 +271,8 @@ class DriftController:
             fix = -p.k_path * s.path_lat - p.k_course * course
             r_ref += max(-p.path_r_max, min(p.path_r_max, fix))
         if ph is Phase.HOLD:
-            turned = abs(math.remainder(s.yaw - self.yaw0, math.tau))
+            yaw_from = self.yaw_point if p.turn_from_point else self.yaw0
+            turned = abs(math.remainder(s.yaw - yaw_from, math.tau))
             limit = (self.active.angle - p.exit_lead) if self.active.angle else p.hold_angle
             if self.t_phase >= p.hold_time or turned >= limit:
                 self._go(Phase.EXIT, s, f"held {self.t_phase:.1f} s, {math.degrees(turned):.0f} deg")
