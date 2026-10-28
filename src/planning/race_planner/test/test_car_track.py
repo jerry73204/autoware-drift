@@ -62,3 +62,11 @@ def test_track_resamples_and_interpolates():
     r = t.resampled(5.0)
     assert r.s[1] - r.s[0] == pytest.approx(5.0) and r.s[-1] == pytest.approx(100.0)
     assert r.at(42.0)["x"] == pytest.approx(42.0)
+
+
+def test_surface_sliding_share_comes_from_the_class():
+    table = SurfaceTable.from_yaml(CLASSES)
+    assert table.sliding("asphalt") == pytest.approx(0.8)
+    car = Car.from_spec(SPEC)
+    if os.path.isdir(HARUNA):
+        assert np.allclose(Track.from_swb_course(HARUNA, table, car).sliding, 0.8)

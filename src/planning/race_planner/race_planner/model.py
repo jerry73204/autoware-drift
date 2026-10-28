@@ -12,7 +12,12 @@ of drift_mustang on dry asphalt: Fx/Fz rms 0.012, Fy/Fz rms 0.041 over 3800 whee
 - combined: K = |(C_alpha tan(alpha), C_kappa kappa)| / (mu Fz), the force mu Fz f1(K) along that
   vector (f1 saturates at K = 3 with zero slope: the brush model's full slide);
 - mu: the surface class's absolute peak times the tyre's friction (swb's surface layer; dry
-  asphalt 1.12 at tyre friction 1.0, as measured).
+  asphalt 1.12 at tyre friction 1.0, as measured);
+- past the peak, swb's surface layer lowers mu with the combined slip rho = |(kappa / kappa_p,
+  tan(alpha) / tan(alpha_p))| toward the class's `sliding` share: mu (sliding + (1 - sliding) /
+  rho), the peaks the rig's own (2.3 Fz0 / (0.9 C) in each direction, surface_layer.rig_peaks);
+  rho's knee at 1 is softened for the optimiser. (The layer also lags the drop over the class's
+  relaxation length, 0.5 m on asphalt; a steady model leaves that out.)
 
 The body is planar, x forward, y left, yaw rate r; the wheels at (lf, +-track/2), (-lr, +-track/2);
 the front pair steered by Ackermann from the bicycle angle delta; the loads by the static split
@@ -29,7 +34,10 @@ constraint between its wheels: locked (one speed) or open (one torque).
 import casadi as ca
 
 G = 9.81
-V_MIN = 0.5      # m/s: the slips' denominator never falls below this (standstill)
+# PhysX 5's slips (VhTireFunctions.cpp) with aib's minimum denominators (params.py): the
+# longitudinal (omega R - v_x) / (|v_x| + 4), the lateral v_y / (|v_x| + 1). The tyre's
+# stiffnesses act on these, as Isaac's logged slips are.
+SLIP_LONG_OFFSET, SLIP_LAT_OFFSET = 4.0, 1.0
 
 
 def _f1_over_k(K):
@@ -44,8 +52,25 @@ def rest_loads(car):
     return [f, f, r, r]
 
 
-def tyre(car, kappa, tan_alpha, fz, fz0, mu):
-    """PhysX's tyre: (Fx, Fy) in the wheel's frame (Fy opposes the slip angle)."""
+PEAK_SPAN, STIFFNESS_IN_USE = 2.3, 0.9    # swb's surface_layer.rig_peaks
+KNEE = 30.0                                # the softened knee's sharpness (1 / rho)
+
+
+def peaks(car):
+    """The rig's peak slips at friction 1.0: (kappa_p, tan alpha_p), swb's rule."""
+    load = car.m * G / 4
+    return (PEAK_SPAN * load / (STIFFNESS_IN_USE * car.long_stiff_value * G),
+            PEAK_SPAN / (STIFFNESS_IN_USE * car.lat_stiff_value))
+
+
+def tyre(car, kappa, tan_alpha, fz, fz0, mu, sliding=1.0):
+    """PhysX's tyre under swb's surface layer: (Fx, Fy) in the wheel's frame (Fy opposes the
+    slip angle)."""
+    kp, tp = peaks(car)
+    rho = ca.sqrt((kappa / kp) ** 2 + (tan_alpha / tp) ** 2 + 1e-12)
+    z = KNEE * (rho - 1.0)                 # softplus, in its overflow-free form
+    rho = 1.0 + (ca.fmax(z, 0.0) + ca.log(1.0 + ca.exp(-ca.fabs(z)))) / KNEE
+    mu = mu * (sliding + (1.0 - sliding) / rho)
     load = ca.fmin(3.0 * fz / (fz0 * car.lat_stiff_max_load), 3.0)
     c_lat = fz0 * car.lat_stiff_value * (load - load * load / 3.0 + load ** 3 / 27.0)
     c_lon = car.long_stiff_value * G
@@ -83,13 +108,14 @@ def loads(car, ax, ay):
             st[2] + dlon - dlat_r, st[3] + dlon + dlat_r]
 
 
-def dynamics(car, x, u, mu, acc):
+def dynamics(car, x, u, mu, acc, sliding=1.0):
     """The body's accelerations and what the wheels need.
 
     x = (vx, vy, r): the body's velocity (m/s, m/s, rad/s).
     u = (delta, w_fl, w_fr, w_rl, w_rr): the bicycle steering angle and each wheel's peripheral
         speed (m/s; omega R).
-    mu: the friction under the wheels (a number or four).
+    mu: the friction under the wheels (a number or four); sliding: its share past the peak (the
+        surface class's; a number or four).
     acc = (ax, ay): the body's accelerations the loads are taken at (the minimum-time problem
         makes them variables equal to the result; a simulation takes the last step's).
 
@@ -100,6 +126,7 @@ def dynamics(car, x, u, mu, acc):
     vx, vy, r = x[0], x[1], x[2]
     delta, w = u[0], [u[1], u[2], u[3], u[4]]
     mus = mu if isinstance(mu, (list, tuple)) else [mu] * 4
+    sls = sliding if isinstance(sliding, (list, tuple)) else [sliding] * 4
     dl, dr_ = ackermann(car, delta)
     steer = [dl, dr_, 0.0, 0.0]
     fz = loads(car, acc[0], acc[1])
@@ -110,10 +137,10 @@ def dynamics(car, x, u, mu, acc):
         ux, uy = vx - r * py, vy + r * px                 # the wheel's ground velocity, body
         c, s = ca.cos(steer[i]), ca.sin(steer[i])
         lx, ly = c * ux + s * uy, -s * ux + c * uy        # in the wheel's frame
-        den = ca.sqrt(lx * lx + V_MIN * V_MIN)
-        kappa = (w[i] - lx) / den
-        tan_a = ly / den
-        fx, fy = tyre(car, kappa, tan_a, fz[i], fz0[i], mus[i])
+        speed = ca.sqrt(lx * lx + 1e-4)
+        kappa = (w[i] - lx) / (speed + SLIP_LONG_OFFSET)
+        tan_a = ly / (speed + SLIP_LAT_OFFSET)
+        fx, fy = tyre(car, kappa, tan_a, fz[i], fz0[i], mus[i], sls[i])
         bx, by = c * fx - s * fy, s * fx + c * fy         # back to the body
         Fx, Fy = Fx + bx, Fy + by
         Mz = Mz + px * by - py * bx

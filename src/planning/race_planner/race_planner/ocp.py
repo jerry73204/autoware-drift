@@ -43,10 +43,11 @@ U_SCALE = np.array([1.0, 20.0, 20.0, 20.0, 20.0, 10.0, 10.0])
 
 def _node_functions(car):
     """f(x, u, p) -> (dx/ds, dt/ds); g(x, u, p) -> path constraints (see bounds)."""
-    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", 7), ca.SX.sym("p", 3)   # p: kappa, mu, grade
+    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", 7), ca.SX.sym("p", 4)   # kappa mu grade sliding
     vx, vy, r, n, xi, delta = (x[i] for i in range(6))
     kappa, mu, grade = p[0], p[1], p[2]
-    o = model.dynamics(car, [vx, vy, r], [delta, u[1], u[2], u[3], u[4]], mu, [u[5], u[6]])
+    o = model.dynamics(car, [vx, vy, r], [delta, u[1], u[2], u[3], u[4]], mu, [u[5], u[6]],
+                       p[3])
     sin_t = grade / ca.sqrt(1 + grade * grade)
     dvx = o["dx"][0] - G * sin_t * ca.cos(xi)
     dvy = o["dx"][1] + G * sin_t * ca.sin(xi)
@@ -109,7 +110,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     else:
         h = np.diff(s)
     M = len(h)
-    P = np.vstack([track.kappa, track.mu, track.grade])
+    P = np.vstack([track.kappa, track.mu, track.grade, track.sliding])
     X0, U0 = _warm_start(track, car, margin, v_start)
 
     opti = ca.Opti()

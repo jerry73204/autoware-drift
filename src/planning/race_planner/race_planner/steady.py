@@ -14,9 +14,11 @@ import casadi as ca
 from race_planner import model
 
 
-def steady_state(car, mu, speed=None, radius=None, delta=None, maximise_speed=False):
-    """A steady state on `car` with friction `mu`. Give two of speed (m/s, the CoM's), radius
-    (m, > 0 left) and delta (the bicycle steering angle, rad), or a radius and maximise_speed.
+def steady_state(car, mu, speed=None, radius=None, delta=None, maximise_speed=False,
+                 sliding=1.0):
+    """A steady state on `car` with friction `mu` (and its share past the peak, `sliding`).
+    Give two of speed (m/s, the CoM's), radius (m, > 0 left) and delta (the bicycle steering
+    angle, rad), or a radius and maximise_speed.
 
     Returns a dict: ok, speed, radius, delta, vx, vy, r, beta (rad, at the CoM), ay, w (the four
     wheels' peripheral speeds), torque, kappa, alpha (tan), fz.
@@ -24,7 +26,7 @@ def steady_state(car, mu, speed=None, radius=None, delta=None, maximise_speed=Fa
     z = ca.SX.sym("z", 9)               # vx vy r w_fl w_fr w_rl w_rr ax ay
     d = ca.SX.sym("delta") if delta is None else delta
     v = ca.SX.sym("speed") if speed is None else speed
-    o = model.dynamics(car, z[0:3], [d, z[3], z[4], z[5], z[6]], mu, [z[7], z[8]])
+    o = model.dynamics(car, z[0:3], [d, z[3], z[4], z[5], z[6]], mu, [z[7], z[8]], sliding)
     g = [*o["dx"], o["torque"][0], o["torque"][1], o["diff"],
          o["acc"][0] - z[7], o["acc"][1] - z[8], z[0] ** 2 + z[1] ** 2 - v ** 2]
     guess_v = 10.0 if speed is None else float(speed)

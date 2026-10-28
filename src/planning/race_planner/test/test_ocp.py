@@ -94,6 +94,6 @@ def test_haruna_section_solves():
     t = Track.from_swb_course(HARUNA, SurfaceTable.from_yaml(CLASSES), c).resampled(2.0)
     t = dataclasses.replace(t, **{k: getattr(t, k)[:200] for k in
                                   ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right",
-                                   "mu", "grade")})
+                                   "mu", "grade", "sliding")})
     sol = solve_min_time(t, c, v_start=15.0)
     check_feasible(t, sol, c)
