@@ -7,7 +7,8 @@
 --grip, the share of the road's friction the plan uses (a margin for
 the tracker). The npz holds, per node along the section: s, t, x, y (map frame), the
 path's heading psi_path, yaw (the body's: psi_path - beta), vx, vy, r, delta, beta, speed, n, and
-torque (fl, fr, rl, rr, N m, > 0 driving), plus time (s) and the car's name.
+torque (fl, fr, rl, rr, N m, > 0 driving) and each tyre's load fz (N), slip kappa and slip
+angle alpha (PhysX's), plus time (s) and the car's name.
 """
 import argparse
 import dataclasses
@@ -37,9 +38,10 @@ def plan(map_dir, spec, classes, s0=20.0, s1=620.0, v_start=1.0, ds=2.0, diff=No
     x, y = sol["x"], sol["y"]
     psi_path = np.unwrap(np.arctan2(np.gradient(y), np.gradient(x)))
     out = {k: sol[k] for k in ("s", "t", "x", "y", "vx", "vy", "r", "delta", "beta", "n")}
+    last = lambda a: np.vstack([a, a[-1:]])  # noqa: E731  per interval -> per node
     out.update(psi_path=psi_path, yaw=psi_path - sol["beta"],
-               speed=np.hypot(sol["vx"], sol["vy"]),
-               torque=np.vstack([sol["torque"], sol["torque"][-1:]]))
+               speed=np.hypot(sol["vx"], sol["vy"]), torque=last(sol["torque"]),
+               fz=last(sol["fz"]), kappa=last(sol["kappa"]), alpha=last(sol["alpha"]))
     return sol, out, car
 
 

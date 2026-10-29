@@ -113,4 +113,6 @@ def test_the_plan_brakes_with_the_car_s_own_bias():
     front = T[braking, 0] + T[braking, 1]
     assert np.allclose(front / T[braking].sum(axis=1), 0.5, atol=0.02)
     assert np.allclose(T[braking, 0], T[braking, 1], atol=5.0)
-    assert sol["violation"]["both"][0] < 1e4
+    # the motor's drive under the brakes: the rear's torque beyond its brake share
+    drive = T[braking, 2] + T[braking, 3] - (T[braking, 0] + T[braking, 1])
+    assert drive.max() < 50.0

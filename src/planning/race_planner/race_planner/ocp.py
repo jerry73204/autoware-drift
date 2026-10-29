@@ -42,8 +42,12 @@ U_SCALE = np.array([1.0, 20.0, 20.0, 20.0, 20.0, 10.0, 10.0])
 PATH_ROWS = ("ax", "ay", "diff", "front_pair", "brake", "brake_max", "drive", "power", "both",
              "fz_fl", "fz_fr", "fz_rl", "fz_rr", "sdot", "k_fl", "k_fr", "k_rl", "k_rr")
 # braking and driving at once: an exact penalty on drive x brake demand, s per (N m)^2 and m (a
-# constraint of it is a complementarity, which IPOPT's restoration does not get through)
-W_BOTH = 1e-9
+# constraint of it is a complementarity, which IPOPT's restoration does not get through), raised
+# solve by solve from the last one's solution. The car cannot do both: its vehicle interface asks
+# one acceleration, and the ECU brakes every axle by the brake distribution, regenerating on the
+# rear within its share. At 1e-9 alone a plan drives the rear against its brakes (Haruna s 250,
+# +500 N m) to move the balance forward, which nothing tracking it can ask for.
+W_BOTH = (1e-9, 1e-7, 1e-6, 1e-5)
 # The slips' range: a locked wheel's PhysX slip is -v / (v + 4) > -1; the front wheels only brake;
 # a driven wheel spins at most this (past the peak the force is flat, and IPOPT, left free, wanders
 # out there where nothing has a gradient)
@@ -189,8 +193,8 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     grip: the share of the road's friction the plan may use (1: all of it); below 1 it leaves a
     tracker room for what the model gets wrong at the limit.
 
-    Two solves: first with each wheel's torque free within its brake and the motor, from the
-    minimum-curvature line's warm start; then the car's own, from that. Started cold, the brake system's coupling
+    Solves in turn: first with each wheel's torque free within its brake and the motor, from the
+    minimum-curvature line's warm start; then the car's own, from that, once per W_BOTH. Started cold, the brake system's coupling
     of the wheels' torques leaves IPOPT in restoration (a locked axle on a bend)."""
     f, g, lbg, ubg, out, (g_free, lo, hi) = _node_functions(car)
     closed = track.closed
@@ -207,9 +211,11 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     ok, status, Xv, Uv = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
                                 max_iter, verbose, 0.0)
     stages = [status]
-    if ok:
+    for w_both in W_BOTH:
+        if not ok:
+            break
         ok, status, Xv, Uv = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
-                                    max_iter, verbose, W_BOTH)
+                                    max_iter, verbose, w_both)
         stages.append(status)
     vx, vy, r, n, xi, delta = Xv
     sdot = (vx * np.cos(xi) - vy * np.sin(xi)) / (1 - n * track.kappa)
