@@ -88,8 +88,10 @@ class Driver:
     log: list = field(default_factory=list)
 
     def __post_init__(self):
-        if not self.track.closed:     # the window reaches past the finish: a straight run-off
-            self.track = self.track.extended(self.length + 2 * self.ds)
+        if not self.track.closed:     # the window reaches past the finish: a straight run-off,
+            # two windows long (a warm start's cold tail starts up to 0.8 of a window on and
+            # runs a whole one: one window crashed Isaac's run at the finish)
+            self.track = self.track.extended(2 * self.length + 4 * self.ds)
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False)
         self.warm = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
                            budget=self.budget)

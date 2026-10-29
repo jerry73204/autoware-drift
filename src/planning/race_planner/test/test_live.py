@@ -90,3 +90,13 @@ def test_three_failed_solves_in_a_row_stop_the_car():
     assert st["t"] < 11.0              # 3 timer solves (~4 s), then braking from ~32 m/s at 6 m/s^2
     assert abs(st["n"]) < 5.0 - 0.5 * c.width                # stopped on the road
     assert abs(st["n"] - d.log[-1]["n_plan"]) < 0.3          # on the line it had
+
+
+def test_the_live_loop_drives_through_the_finish():
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0, 400.0, ds=4.0, w=5.0)
+    plant = Plant(c, SPEC, road(lambda s: 0.0, 400.0, ds=1.0, w=5.0).extended(400.0))
+    plant.reset(s=150.0, speed=20.0)
+    d = Driver(c, tr, Tracker(c, tr))
+    out = run(d, plant, s_end=420.0, t_max=30.0)          # 20 m past the finish
+    assert out["result"] == "done", out
