@@ -286,8 +286,8 @@ class Tracker:
         par = ca.vertcat(ca.vec(P), ca.vec(REF), AREF, WL, WR)
         res, lin, cons, lbc, ubc = [], 0, [], [], []
         # the limit rows (see _dynamics): use x4, drive, power, the brakes x2, then the tyres':
-        # rear balance, its slips x2, front balances x2, their slips x2
-        soft, bal = [0, 1, 2, 3], [4, 5, 6, 7, 9, 10, 13, 14]
+        # rear balance, its slips x2, front balances x2, their slips x2, the slopes x4
+        soft, bal = [0, 1, 2, 3], [4, 5, 6, 7, 9, 10, 13, 14, 15, 16, 17, 18]
         hard = [i for i in range(len(lbg)) if i not in soft + bal]
         isx = 1.0 / SCALE_X
         for k in range(N):

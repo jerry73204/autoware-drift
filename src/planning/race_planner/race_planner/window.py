@@ -45,8 +45,12 @@ END_SLIP, END_HEADING = 0.15, 0.35      # the window's last node: vy / vx, xi (r
 DROP = 0.2                              # the share of a plan's end not reused as a warm start
 NU = 7                                  # a stage's controls: rate a ax ay, the wheels' speeds
 NZ = 14                                 # a stage's variables: x (6), u (7), edge slack (1)
-KAPPA_MAX = 1.0                         # a tyre's slip ratio, either way
+KAPPA_MAX = 0.6                         # a tyre's slip ratio, either way: past the peak (0.26-
+# 0.38) the force is flat and its slope near zero, where IPOPT, its iterate wandered there, found
+# the slope rows locally infeasible (KAPPA_MAX 1.0: the first plan on Haruna failed)
 FRONT_KAPPA_UP = 0.05                   # a front (braking only) wheel's, at most
+SLOPE_MIN = 0.01                        # dFx/dkappa, in the tyre's stiffness, at least
+WARM_KAPPA = 0.15                       # a cold guess's slips, at most (the peak is 0.26-0.38)
 EDGE_PENALTY = 10.0                     # s per metre past the road's edge (less the margin)
 CACHE = os.environ.get("RACE_PLANNER_CACHE", os.path.expanduser("~/.cache/race_planner"))
 BLEND = 10                              # nodes over which a warm start's tail joins the plan
@@ -55,7 +59,8 @@ U_SCALE = np.array([1.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0])
 TRACK_FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")
 ROWS = ("ax", "ay", "fz_fl", "fz_fr", "fz_rl", "fz_rr", "use_fl", "use_fr", "use_rl", "use_rr",
         "drive", "power", "brake_front", "brake_rear", "sdot", "rear_balance", "kappa_rl",
-        "kappa_rr", "front_balance_l", "front_balance_r", "kappa_fl", "kappa_fr")
+        "kappa_rr", "front_balance_l", "front_balance_r", "kappa_fl", "kappa_fr", "slope_fl",
+        "slope_fr", "slope_rl", "slope_rr")
 
 
 NLP_FUNCTIONS = ("nlp", "nlp_f", "nlp_g", "nlp_grad_f", "nlp_jac_g", "nlp_grad", "nlp_hess_l")
@@ -136,6 +141,16 @@ def node_functions(car, tyres=False):
                        *[b / mg for b in o["front_balance"]], *o["kappa_front"])
         lbg += [0, -KAPPA_MAX, -KAPPA_MAX, 0, 0, -KAPPA_MAX, -KAPPA_MAX]
         ubg += [0, KAPPA_MAX, KAPPA_MAX, 0, 0, FRONT_KAPPA_UP, FRONT_KAPPA_UP]
+        # every wheel on its tyre's rising branch (axle._slope): with its force held by a
+        # balance, a slip past the peak gives the same force as one before it, the cost on a
+        # straight cannot tell them apart and the plans sat at slips of 0.4-1, which a wheel
+        # with no traction control cannot hold (it spins up). In units of the tyre's
+        # longitudinal stiffness: at least SLOPE_MIN of it (0.1 % of the force short of the
+        # peak). The KAPPA_MAX rows stay as a backstop.
+        c_lon = car.long_stiff_value * G
+        g = ca.vertcat(g, *[s / c_lon for s in o["slope"]])
+        lbg += [SLOPE_MIN] * 4
+        ubg += [ca.inf] * 4
     out = ca.Function("out", [x, u, p], [ca.vertcat(*o["fx"]), ca.vertcat(*o["fy"]),
                                          ca.vertcat(*o["fz"]), ca.vertcat(*o["use"]),
                                          ca.vertcat(*o["alpha"])])
@@ -179,7 +194,8 @@ def wheel_lx(car, X):
 def wheel_speeds(car, X, a):
     """The wheels' peripheral speeds (rear axle, front left, front right; 3 x n) for states X
     (6 x n) making the forces the request a asks of the ECU: each tyre's slip at its
-    longitudinal stiffness (within KAPPA_MAX / 2) from its own ground speed."""
+    longitudinal stiffness from its own ground speed, within WARM_KAPPA: on the rising branch
+    (a guess past the peak started IPOPT where it found the slope rows locally infeasible)."""
     lx = wheel_lx(car, X)
     vx = np.asarray(X[0], float)
     F = car.m * np.asarray(a, float) + car.drag * vx * vx + car.roll * car.m * G
@@ -189,7 +205,7 @@ def wheel_speeds(car, X, a):
     c = 2 * car.long_stiff_value * G                     # a pair's stiffness
 
     def speed(force, v):
-        kap = np.clip(force / c, -0.5 * KAPPA_MAX, 0.5 * KAPPA_MAX)
+        kap = np.clip(force / c, -WARM_KAPPA, WARM_KAPPA)
         return np.maximum(v + kap * (np.abs(v) + model.SLIP_LONG_OFFSET), 0.0)
 
     return np.vstack([speed(rear, 0.5 * (lx[2] + lx[3])), speed(front, lx[0]),

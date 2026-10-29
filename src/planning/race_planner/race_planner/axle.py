@@ -75,6 +75,23 @@ def brake_share(car, decel=0.0):
     return ca.fmin(ca.fmax(share, 0.05), 0.95)
 
 
+_SLOPES = {}
+
+
+def _slope(car, fz0):
+    """dFx/dkappa of PhysX's tyre (model.tyre) at a wheel of rest load fz0, as a function of
+    (kappa, tan alpha, fz, mu, sliding). A wheel whose force falls as its slip grows is unstable
+    without traction control or ABS: its spin runs away (sim.py's plant: a request whose rear
+    force is just past the peak, a 6.0 on drift_mustang at 15 m/s with sliding 0.8, takes the slip
+    from 0.27 to 0.54 in 1.5 s; 6.5 to 1.0 at once), so a plan must stay on the rising branch."""
+    key = (id(car), float(fz0))
+    if key not in _SLOPES:
+        k, ta, fz, mu, sl = (ca.SX.sym(n) for n in ("k", "ta", "fz", "mu", "sl"))
+        fx, _ = model.tyre(car, k, ta, fz, fz0, mu, sl)
+        _SLOPES[key] = ca.Function("tyre_slope", [k, ta, fz, mu, sl], [ca.jacobian(fx, k)])
+    return _SLOPES[key]
+
+
 def feedforward(car, a, vx):
     """The ECU's tractive force for the request a at forward speed vx (sim_vehicle_ecu's
     powertrain.feedforward): the car and its wheels' inertia times a, the road load and the
@@ -143,7 +160,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
     fx = [-0.5 * front_brake - loss, -0.5 * front_brake - loss, rl, rr]
     if w_rear is not None:
         assert car.diff == "locked", "the rear tyres' own slip: a locked axle only"
-    kappas, kappas_f = [], []
+    kappas, kappas_f, slopes = [], [], []
     dl, dr_ = model.ackermann(car, delta)
     steer = [dl, dr_, 0.0, 0.0]
     Fx = Fy = Mz = 0.0
@@ -158,6 +175,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
             kap = (w_own - lx) / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LONG_OFFSET)
             fx[i], fy = model.tyre(car, kap, tan_a, fz[i], fz0[i], mus[i], sls[i])
             (kappas if i >= 2 else kappas_f).append(kap)
+            slopes.append(_slope(car, fz0[i])(kap, tan_a, fz[i], mus[i], sls[i]))
             use = fx[i] / (mus[i] * ca.sqrt(fz[i] * fz[i] + 1.0))
             bx, by = c * fx[i] - s * fy, s * fx[i] + c * fy
             Fx, Fy = Fx + bx, Fy + by
@@ -193,6 +211,8 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
     if w_rear is not None:
         out["kappa"] = kappas
         out["rear_balance"] = out["fx"][2] + out["fx"][3] - rear
+    if slopes:
+        out["slope"] = slopes            # dFx/dkappa per tyre-modelled wheel, in wheel order
     if w_front is not None:
         out["kappa_front"] = kappas_f
         out["front_balance"] = [out["fx"][j] + 0.5 * front_brake + loss for j in (0, 1)]
