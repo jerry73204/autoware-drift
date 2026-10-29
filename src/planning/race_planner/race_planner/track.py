@@ -80,6 +80,25 @@ class Track:
              for k in ("x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")}
         return replace(self, s=s, **f)
 
+    def unrolled(self, laps):
+        """A closed track as an open road `laps` laps long, its loop repeated end to end (s and
+        psi running on): what the live loop drives, since a receding window never needs the loop
+        to close. A closed track's last node is one step before its first (058's convention);
+        the result ends on the last lap's first node, so it is `laps` laps long exactly."""
+        assert self.closed, "only a closed track unrolls"
+        step = float(self.s[1] - self.s[0])
+        lap = self.length + step
+        # the loop's whole turn: the last node's heading plus the last step's, a multiple of 2 pi
+        last = float(np.remainder(self.psi[0] - self.psi[-1] + np.pi, 2 * np.pi) - np.pi)
+        turn = float(self.psi[-1] - self.psi[0]) + last
+        n = len(self.s)
+        idx = np.concatenate([np.arange(n)] * laps + [[0]])
+        k = np.repeat(np.arange(laps + 1), n)[:len(idx)]
+        f = {key: getattr(self, key)[idx]
+             for key in ("x", "y", "z", "kappa", "w_left", "w_right", "mu", "grade", "sliding")}
+        return replace(self, s=self.s[idx] + k * lap, psi=self.psi[idx] + k * turn, closed=False,
+                       **f)
+
     @classmethod
     def from_swb_course(cls, map_dir, surfaces, car):
         """A section built by swb's course generator (swb_isaac_world.course): its centreline,
@@ -95,6 +114,7 @@ class Track:
                    z=np.asarray(c["z"], float), psi=np.asarray(c["heading"], float),
                    kappa=np.asarray(c["curvature"], float), w_left=half * ones,
                    w_right=half * ones, mu=surfaces.mu(road_cls, car) * ones,
-                   sliding=surfaces.sliding(road_cls) * ones, closed=False,
+                   sliding=surfaces.sliding(road_cls) * ones,
+                   closed="closed" in c.files and bool(c["closed"]),   # a circuit (058's loops)
                    name=os.path.basename(os.path.normpath(map_dir)),
                    grade=np.asarray(c["grade"], float))

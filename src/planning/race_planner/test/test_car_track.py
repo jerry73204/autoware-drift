@@ -74,3 +74,22 @@ def test_surface_sliding_share_comes_from_the_class():
 
 def test_car_reads_its_brake_distribution():
     assert Car.from_spec(SPEC).brake_distribution == "static"
+
+
+def test_a_closed_track_unrolls_into_laps_end_to_end():
+    import math
+    r = 50.0
+    step = 2 * math.pi * r / 628
+    s = np.arange(628) * step                                # a circle, last node a step short
+    th = s / r
+    one = np.ones_like(s)
+    t = Track(s=s, x=r * np.sin(th), y=r * (1 - np.cos(th)), z=0 * s, psi=th, kappa=one / r,
+              w_left=5 * one, w_right=5 * one, mu=one, closed=True)
+    u = t.unrolled(3)
+    lap = s[-1] + step
+    assert not u.closed
+    assert u.length == pytest.approx(3 * lap)
+    assert np.all(np.diff(u.s) > 0)
+    assert u.psi[-1] - u.psi[0] == pytest.approx(3 * 2 * math.pi, abs=1e-6)
+    assert np.max(np.abs(np.diff(u.psi))) < 0.02             # no jump at the seams
+    assert np.max(np.hypot(np.diff(u.x), np.diff(u.y))) == pytest.approx(step, abs=0.01)
