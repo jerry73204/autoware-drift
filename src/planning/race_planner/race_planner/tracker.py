@@ -59,8 +59,10 @@ NR = 6                          # references per node: n xi vx vy r delta
 # Tracking scales: the error that costs as much as one unit (the cost is the error over its
 # scale, squared). The line's are what L1's envelope allows (0.5 m, 5 deg, 2 m/s: 4.4) halved;
 # sideslip and yaw rate are tight enough to hold a planned slide, loose enough that the line
-# and the speed can buy stability with them.
-SCALE_X = np.array([0.2, 0.1, 0.7, 0.8, 0.3, 0.5])        # n xi vx vy r delta
+# and the speed can buy stability with them. The steering's (0.1 rad) keeps L2 near the plan's
+# steering: at 0.5 it wandered 25-30 deg off it on the live bend (p95 25 deg), with 0.1 it
+# keeps within 13 deg (p95 6), tracking as well (R20 bend 0.09 m, S-bend 0.14 m).
+SCALE_X = np.array([0.2, 0.1, 0.7, 0.8, 0.3, 0.1])        # n xi vx vy r delta
 SCALE_RATE, SCALE_A, SCALE_JERK = 1.5, 3.0, 25.0          # rad/s; m/s^2 off the plan's; m/s^3
 TERMINAL = 10.0                 # the last node's weight: where the car is in a second counts
 EDGE_QUAD, EDGE_LIN = 1e4, 1e3  # the edge slack's cost per m^2, per m: far above tracking
