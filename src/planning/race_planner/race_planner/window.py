@@ -14,13 +14,21 @@ acceleration request; the ECU's split of it into wheel forces), over a window of
 - the car's limits (SR3): steering lock and rate, the motor's torque and power at the rear
   axle, each wheel's brake (the rear's with what the motor regenerates), the rear wheels' top
   speed (the motor's rpm), and every wheel's longitudinal force within its grip;
-- the road's width less the car's half width and a margin; forward along the track.
+- the road's width less the car's half width and a margin, soft (an exact penalty, far above
+  any time the road's last metre could buy) but at the window's end: the car's own state may
+  already be past it, or bound to cross it, and a plan must still come back (the live loop
+  found 3 of 9 solves "infeasible" that way); forward along the track.
 
-Built once (CasADi Opti, IPOPT on the expanded graph); each solve sets the parameters and the
-warm start. The warm start is the last plan shifted by the distance driven, its tail from the
-long view (`tail`).
+Built once (IPOPT on a C-compiled, stage-mapped problem: `Window`); each solve sets the
+parameters and the warm start. The warm start is the last plan shifted by the distance driven,
+its tail the cold guess from where the plan is left (`Window.warm`).
 """
+import hashlib
 import math
+import os
+import shutil
+import subprocess
+import tempfile
 import time
 
 from dataclasses import replace
@@ -35,11 +43,52 @@ G = 9.81
 REG_STEER, REG_ACCEL = 1e-2, 1e-4
 END_SLIP, END_HEADING = 0.15, 0.35      # the window's last node: vy / vx, xi (rad)
 DROP = 0.2                              # the share of a plan's end not reused as a warm start
+NZ = 11                                 # a stage's variables: x (6), u (4), edge slack (1)
+EDGE_PENALTY = 10.0                     # s per metre past the road's edge (less the margin)
+CACHE = os.environ.get("RACE_PLANNER_CACHE", os.path.expanduser("~/.cache/race_planner"))
+BLEND = 10                              # nodes over which a warm start's tail joins the plan
 X_SCALE = np.array([20.0, 2.0, 1.0, 3.0, 0.3, 0.3])
 U_SCALE = np.array([1.0, 10.0, 10.0, 10.0])
 TRACK_FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")
 ROWS = ("ax", "ay", "fz_fl", "fz_fr", "fz_rl", "fz_rr", "use_fl", "use_fr", "use_rl", "use_rr",
         "drive", "power", "brake_front", "brake_rear", "sdot")
+
+
+NLP_FUNCTIONS = ("nlp", "nlp_f", "nlp_g", "nlp_grad_f", "nlp_jac_g", "nlp_grad", "nlp_hess_l")
+
+
+def _compiled_nlpsol(nlp, opts, hess=None):
+    """IPOPT on nlp with its functions C-compiled (the Lagrangian's Hessian `hess` where given,
+    CasADi's own otherwise): generated once, compiled once per distinct code (cached by its
+    hash under CACHE), loaded; None without a compiler."""
+    probe = ca.nlpsol("l1", "ipopt", nlp, opts)
+    d = tempfile.mkdtemp(prefix="race_planner_")
+    cg = ca.CodeGenerator("l1_nlp.c", {"with_header": False})
+    for name in NLP_FUNCTIONS:
+        cg.add(hess if name == "nlp_hess_l" and hess is not None
+               else probe.get_function(name) if name != "nlp" else probe.oracle())
+    cg.generate(d + os.sep)
+    src = os.path.join(d, "l1_nlp.c")
+    key = hashlib.sha1(open(src, "rb").read()).hexdigest()[:16]
+    try:
+        return _load(src, key, opts)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _load(src, key, opts):
+    """The library for code `src` (compiled into CACHE unless there already), loaded."""
+    os.makedirs(CACHE, exist_ok=True)
+    lib = os.path.join(CACHE, f"l1_nlp_{key}.so")
+    if not os.path.exists(lib):
+        tmp = f"{lib}.{os.getpid()}.tmp"
+        try:
+            subprocess.run(["gcc", "-O2", "-fPIC", "-shared", src, "-o", tmp, "-lm"],
+                           check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        os.replace(tmp, lib)
+    return ca.nlpsol("l1", "ipopt", lib, opts)
 
 
 def node_functions(car):
@@ -97,62 +146,118 @@ def controls_for(X, s, car):
 
 
 class Window:
-    """The L1 problem for a window of `length` metres on a grid of `ds`, built once."""
+    """The L1 problem for a window of `length` metres on a grid of `ds`, built once.
+
+    How it is fast enough to be live (M1, 2026-10-30). The problem is written once per stage (a
+    CasADi function of one interval: its RK4 step, its time, its limit rows) and mapped over the
+    window, not expanded: IPOPT's functions are then a loop over one stage's code and its
+    derivatives, which C-compiles in seconds (the expanded problem's Hessian was 130 MB of C, and
+    evaluated in CasADi's virtual machine took 8 ms of each 12 ms iteration). The library is
+    cached on disk by its code's hash (`CACHE`); the Lagrangian's Hessian is assembled from each
+    stage's own block. An iteration then costs about 4 ms (12 before), half of it MUMPS's.
+    Warm re-solves along Haruna: 56 of 56 feasible, p50 0.22 s, p95 0.54 s, p99 0.77 s, the
+    plan's time within 0.06 % of a tightly converged IPOPT on the old form on average (2.1 % at
+    worst, another local optimum)."""
 
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
-                 tol=1e-3, budget=None, warm=True):
+                 tol=1e-3, budget=None, warm=True, compile=True, ipopt=None):
         self.car, self.ds, self.grip, self.margin = car, ds, grip, margin
         self.N = N = int(round(length / ds)) + 1
         self.M = M = N - 1
         self.f, self.g, lbg, ubg, self.out = node_functions(car)
-        opti = ca.Opti()
-        self.Xs, self.Us = opti.variable(6, N), opti.variable(4, M)
-        X = ca.diag(X_SCALE) @ self.Xs
-        U = ca.diag(U_SCALE) @ self.Us
-        self.x0, self.P = opti.parameter(6), opti.parameter(4, M)
-        self.WL, self.WR, self.vend = opti.parameter(N), opti.parameter(N), opti.parameter()
-        T = 0
-        for k in range(M):
-            xn, dt = rk4(self.f, X[:, k], U[:, k], self.P[:, k], ds)
-            opti.subject_to(X[:, k + 1] == xn)
-            T += dt + REG_STEER * U[0, k] ** 2 * ds
-            gk = self.g(X[:, k], U[:, k], self.P[:, k])
-            opti.subject_to(opti.bounded(np.array(lbg, float), gk, np.array(ubg, float)))
-            if k + 1 < M:
-                T += REG_ACCEL * (U[1, k + 1] - U[1, k]) ** 2
-        half = 0.5 * car.width
-        opti.subject_to(opti.bounded(-(self.WR - half - margin), X[3, :].T,
-                                     self.WL - half - margin))
-        opti.subject_to(opti.bounded(-car.steer_max, ca.vec(X[5, :]), car.steer_max))
-        rate = car.steer_rate_max or STEER_RATE
-        opti.subject_to(opti.bounded(-rate, ca.vec(U[0, :]), rate))
-        opti.subject_to(opti.bounded(-math.pi / 2, ca.vec(X[4, :]), math.pi / 2))
-        if car.wheel_speed_max is not None:
-            opti.subject_to(ca.vec(X[0, :]) <= car.wheel_speed_max)
-        opti.subject_to(X[:, 0] == self.x0)
-        # the window's end: no faster than the long view allows, and running near straight
-        # (a receding horizon's last nodes are otherwise free to do anything, since nothing
-        # after them counts, and the next window inherits it)
-        opti.subject_to(X[0, N - 1] <= self.vend)
-        opti.subject_to(opti.bounded(-END_SLIP * X[0, N - 1], X[1, N - 1], END_SLIP * X[0, N - 1]))
-        opti.subject_to(opti.bounded(-END_HEADING, X[4, N - 1], END_HEADING))
-        opti.minimize(T)
+        self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
+        ng = len(lbg)
+        # one stage in the scaled variables
+        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", 4), ca.SX.sym("p", 4)
+        x, u = xs * X_SCALE, us * U_SCALE
+        xn, dt = rk4(self.f, x, u, p, ds)
+        stage = ca.Function("l1_stage", [xs, us, p], [xn / X_SCALE, dt, self.g(x, u, p)])
+        # the decision vector stage by stage (x_k, u_k), then x_N
+        # (x_k, u_k, e_k: how far node k is past the road's edge less the margin)
+        W = ca.MX.sym("w", NZ * M + 6)
+        Pw = ca.MX.sym("p", 6, M)                # kappa mu grade sliding, the free width l, r
+        Pp = Pw[:4, :]
+        Z = ca.reshape(W[:NZ * M], NZ, M)
+        Xk, Uk, Ek, xN = Z[:6, :], Z[6:10, :], Z[10, :], W[NZ * M:]
+        xn_s, dts, G = stage.map(M)(Xk, Uk, Pp)
+        n = Xk[3, :] * X_SCALE[3]
+        rows = ca.vertcat(xn_s - ca.horzcat(Xk[:, 1:], xN), G,     # each stage's, together
+                          n + Ek + Pw[5, :], n - Ek - Pw[4, :])
+        sx = X_SCALE
+        end = ca.vertcat(sx[1] * xN[1] + END_SLIP * sx[0] * xN[0],
+                         sx[1] * xN[1] - END_SLIP * sx[0] * xN[0])
+        a = Uk[1, :] * U_SCALE[1]
+        T = (ca.sum2(dts) + REG_STEER * ds * ca.sumsqr(Uk[0, :] * U_SCALE[0])
+             + REG_ACCEL * ca.sumsqr(a[1:] - a[:-1]) + EDGE_PENALTY * ca.sum2(Ek))
+        self.lbg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.lbg, 0.0, -np.inf], M),
+                                       [0.0, -np.inf]])
+        self.ubg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.ubg, np.inf, 0.0], M),
+                                       [np.inf, 0.0]])
+        per = 6 + ng + 2
         # warm-started in its multipliers too (shifted with the window), so the barrier starts
-        # low: re-solves take 20-70 iterations instead of 40-400 (M1, 2026-10-29)
-        # (cold: IPOPT's own start, for the first plan and after a failure)
-        ipopt = {"max_iter": max_iter, "tol": tol, "acceptable_tol": 1e-3, "acceptable_iter": 5,
-                 "print_level": 0, "sb": "yes"}
+        # low (cold: IPOPT's own start, for the first plan and after a failure)
+        extra, ipopt = ipopt or {}, {"max_iter": max_iter, "tol": tol, "acceptable_tol": 1e-3,
+                                     "acceptable_iter": 5, "print_level": 0, "sb": "yes"}
         if warm:
             ipopt.update({"mu_init": 1e-6, "warm_start_init_point": "yes",
                           "warm_start_bound_push": 1e-6, "warm_start_slack_bound_push": 1e-6,
                           "warm_start_mult_bound_push": 1e-6})
         if budget is not None:
             ipopt["max_wall_time"] = float(budget)
-        opti.solver("ipopt", {"print_time": False, "expand": True}, ipopt)
-        self.opti, self.X, self.U = opti, X, U
-        self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
-        self.per_stage = 6 + len(lbg)            # each interval's rows: its dynamics, its path
-        self.lam = None                          # the last solve's multipliers
+        opts = {"print_time": False, "error_on_fail": False, "ipopt": {**ipopt, **extra}}
+        nlp = {"x": W, "p": ca.vec(Pw), "f": T, "g": ca.vertcat(ca.vec(rows), end)}
+        # the Lagrangian's Hessian by stages: CasADi's own, by colouring the whole map, took
+        # 1.8 ms an iteration; each stage's own block is one pass of one stage
+        lam_f, lam_g = ca.MX.sym("lam_f"), ca.MX.sym("lam_g", per * M + 2)
+        zs, ps, lf, lm = ca.SX.sym("z", NZ), ca.SX.sym("p", 4), ca.SX.sym("lf"), ca.SX.sym("l", 6 + ng)
+        o = stage(zs[:6], zs[6:10], ps)
+        Hk, _ = ca.hessian(lf * o[1] + ca.dot(lm[:6], o[0]) + ca.dot(lm[6:], o[2]), zs)
+        hs = ca.Function("l1_stage_hess", [zs, ps, lf, lm], [Hk])
+        Hm = hs.map(M)(Z, Pp, lam_f, ca.reshape(lam_g[:per * M], per, M)[:6 + ng, :])
+        reg = T - ca.sum2(dts)                   # the regularisation's, constant
+        Hreg = ca.Function("hreg", [W], [ca.hessian(reg, W)[0]])(np.zeros(NZ * M + 6))
+        H = ca.diagcat(*ca.horzsplit(Hm, NZ), ca.MX(6, 6)) + lam_f * Hreg
+        hess = ca.Function("nlp_hess_l", [W, ca.vec(Pw), lam_f, lam_g], [ca.triu(H)],
+                           ["x", "p", "lam_f", "lam_g"], ["triu_hess_gamma_x_x"])
+        self.solver = _compiled_nlpsol(nlp, opts, hess) if compile else None
+        if self.solver is None:
+            self.solver = ca.nlpsol("l1", "ipopt", nlp, opts)
+        self.budget = budget
+        self.per_stage = per                     # each interval's rows: dynamics, path, edges
+        self.lam = None                          # the last solve's multipliers (rows)
+        self.lam_x = None                        # and the bounds'
+
+    def bounds(self, wl, wr, x0, v_end):
+        """The decision vector's bounds (scaled): the steering's lock and rate, the heading, the
+        motor's top speed; the window's start fixed at x0; its end no faster than v_end, near
+        straight and on the road less the car's half width and the margin (before it the road
+        is soft: rows with a penalty, `EDGE_PENALTY`)."""
+        car, M, N, inf = self.car, self.M, self.N, np.inf
+        half = 0.5 * car.width
+        rate = car.steer_rate_max or STEER_RATE
+        lo = np.tile([-inf, -inf, -inf, 0.0, -math.pi / 2, -car.steer_max], (N, 1)).T
+        hi = np.tile([car.wheel_speed_max or inf, inf, inf, 0.0, math.pi / 2, car.steer_max],
+                     (N, 1)).T
+        lo[3], hi[3] = -inf, inf
+        lo[3, N - 1], hi[3, N - 1] = -(wr[-1] - half - self.margin), wl[-1] - half - self.margin
+        hi[0, N - 1] = min(hi[0, N - 1], v_end)
+        lo[4, N - 1], hi[4, N - 1] = -END_HEADING, END_HEADING
+        lo[:, 0] = hi[:, 0] = x0                            # the window starts at the state
+        ulo = np.tile([-rate, -inf, -inf, -inf], (M, 1)).T
+        uhi = np.tile([rate, inf, inf, inf], (M, 1)).T
+        return self.pack(lo, ulo, 0.0), self.pack(hi, uhi, inf)
+
+    def pack(self, X, U, e=0.0):
+        """The scaled decision vector from X (6 x N), U (4 x M) and the edge slack e."""
+        Z = np.vstack([X[:, :self.M] / X_SCALE[:, None], U / U_SCALE[:, None],
+                       np.full(self.M, e)])
+        return np.concatenate([Z.ravel(order="F"), X[:, self.M] / X_SCALE])
+
+    def unpack(self, w):
+        M = self.M
+        Z = np.asarray(w).ravel()[:NZ * M].reshape(NZ, M, order="F")
+        X = np.hstack([Z[:6] * X_SCALE[:, None], (np.asarray(w).ravel()[NZ * M:] * X_SCALE)[:, None]])
+        return X, Z[6:10] * U_SCALE[:, None]
 
     def params(self, track, i0):
         """The window's track parameters from node i0 of `track` (on this window's grid)."""
@@ -166,26 +271,28 @@ class Window:
         U_init (4 x M). Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s,
         defect (the largest shooting gap)."""
         P, wl, wr, s = self.params(track, i0)
-        o = self.opti
-        o.set_value(self.x0, x0)
-        o.set_value(self.P, P)
-        o.set_value(self.WL, wl)
-        o.set_value(self.WR, wr)
-        o.set_value(self.vend, v_end)
-        o.set_initial(self.Xs, X_init / X_SCALE[:, None])
-        o.set_initial(self.Us, U_init / U_SCALE[:, None])
-        o.set_initial(o.lam_g, self.lam if self.lam is not None else 0.0)
+        lbx, ubx = self.bounds(wl, wr, x0, v_end)
+        half = 0.5 * self.car.width
+        Pw = np.vstack([P, wl[:self.M] - half - self.margin, wr[:self.M] - half - self.margin])
+        args = {"x0": np.clip(self.pack(X_init, U_init), lbx, ubx), "p": Pw.ravel(order="F"),
+                "lbx": lbx, "ubx": ubx, "lbg": self.lbg_all, "ubg": self.ubg_all}
+        # the multipliers only as a pair: rows' without the bounds' (another window's handed
+        # over, as live.py does from its cold one) cost more iterations than none (p95 1.0 s
+        # against 0.56 s on Haruna)
+        if (self.lam is not None and len(self.lam) == len(self.lbg_all)
+                and self.lam_x is not None and len(self.lam_x) == len(lbx)):
+            args["lam_g0"], args["lam_x0"] = self.lam, self.lam_x
         c = time.time()
-        try:
-            sol = o.solve()
-            get, ok = sol.value, True
-        except RuntimeError:
-            get, ok = o.debug.value, False
+        sol = self.solver(**args)
         dt = time.time() - c
-        st = o.stats()
-        Xv = np.asarray(get(self.X)).reshape(6, self.N)
-        Uv = np.asarray(get(self.U)).reshape(4, self.M)
-        self.lam = np.asarray(get(o.lam_g)).ravel()
+        st = self.solver.stats()
+        self.lam = np.asarray(sol["lam_g"]).ravel()
+        self.lam_x = np.asarray(sol["lam_x"]).ravel()
+        Xv, Uv = self.unpack(sol["x"])
+        return self._result(P, s, Xv, Uv, bool(st["success"]), st["return_status"],
+                            st["iter_count"], dt, i0)
+
+    def _result(self, P, s, Xv, Uv, ok, status, iters, dt, i0):
         seg, gap, over = [], 0.0, 0.0
         for k in range(self.M):
             xn, tk = rk4(self.f, Xv[:, k], Uv[:, k], P[:, k], self.ds)
@@ -193,14 +300,13 @@ class Window:
             gap = max(gap, float(np.max(np.abs(np.asarray(xn).ravel() - Xv[:, k + 1]))))
             gv = np.asarray(self.g(Xv[:, k], Uv[:, k], P[:, k])).ravel()
             over = max(over, float(np.max(np.maximum(gv - self.ubg, self.lbg - gv))))
-        status = st["return_status"]
         # a solve stopped by its budget or its iterations is still a plan if it is feasible:
         # the car is better off with it than with the last one (re-solved next second anyway)
         feasible = gap < 1e-2 and over < 1e-2
         ok = ok or status == "Solved_To_Acceptable_Level" or feasible
         return {"X": Xv, "U": Uv, "s": s, "t": np.concatenate([[0.0], np.cumsum(seg)]),
                 "time": float(np.sum(seg)), "ok": ok, "status": status,
-                "iters": st["iter_count"], "solve_s": dt, "defect": gap, "violation": over,
+                "iters": iters, "solve_s": dt, "defect": gap, "violation": over,
                 "i0": i0}
 
     def section(self, track, i0):
@@ -210,19 +316,34 @@ class Window:
 
     def warm(self, plan, k, track, v_start=None):
         """The warm start for re-solving k nodes on from `plan`: its nodes from k up to the last
-        DROP of it, then the cold guess of the new window (the minimum-curvature line with the
+        DROP of it, then a cold guess for the rest (the minimum-curvature line with the
         quasi-steady speed: it follows the road, which repeating the plan's last state does not,
-        and the plan's own end is a receding horizon's, the least to be trusted)."""
-        Xc, Uc = initial(self.section(track, plan["i0"] + k), self.car, self.margin, v_start)
+        and the plan's own end is a receding horizon's, the least to be trusted). The cold
+        guess starts where the plan is left, at the plan's speed there (v_start overrides), its
+        offset and heading eased from the plan's over BLEND nodes: a guess that jumps where the
+        two meet (10 m/s and a metre on Haruna) is a QP the re-solve cannot linearise well."""
         if self.lam is not None:                             # the multipliers, shifted too
             n, sh = self.M * self.per_stage, k * self.per_stage
             lam = self.lam.copy()
             lam[:n - sh] = self.lam[sh:n]
             self.lam = lam
+        if self.lam_x is not None:
+            n, sh = self.M * NZ, k * NZ
+            lx = self.lam_x.copy()
+            lx[:n - sh] = self.lam_x[sh:n]
+            self.lam_x = lx
         keep = max(1, int((1.0 - DROP) * self.N) - k)        # the plan's nodes reused
-        cut = k + keep
+        cut = k + keep                                       # the plan's node after the last
+        join = plan["i0"] + cut - 1
+        v0 = float(plan["X"][0, cut - 1]) if v_start is None else v_start
+        Xt, Ut = initial(self.section(track, join), self.car, self.margin, v0)
+        need = self.N - keep
+        Xt, Ut = Xt[:, 1:need + 1].copy(), Ut[:, 1:need + 1]
+        ease = np.clip(1.0 - np.arange(1, need + 1) / BLEND, 0.0, 1.0)
+        for row in (3, 4):                                   # n, xi
+            Xt[row] += ease * (plan["X"][row, cut - 1] - Xt[row, 0])
         plan_cut = {"X": plan["X"][:, :cut], "U": plan["U"][:, :cut]}
-        return shift(plan_cut, k, Xc[:, keep:], np.hstack([Uc[:, keep:], Uc[:, -1:]])[:, :self.M - keep + 1])
+        return shift(plan_cut, k, Xt, Ut[:, :self.M - keep + 1])
 
 
 def shift(plan, k, tail_X, tail_U):

@@ -2,6 +2,7 @@
 two-track model on the same road, and re-solving along a road from its own last plan."""
 import dataclasses
 import math
+import os
 
 import casadi as ca
 import numpy as np
@@ -10,8 +11,9 @@ import pytest
 from race_planner import axle
 from race_planner.car import Car
 from race_planner.ocp import solve_min_time
+from race_planner.track import SurfaceTable, Track
 from race_planner.window import Window, initial
-from test_ocp import SPEC, road
+from test_ocp import CLASSES, HARUNA, SPEC, SWB, road
 
 MU = 1.12
 
@@ -84,3 +86,48 @@ def test_re_solving_from_the_last_plan_is_feasible_within_its_budget():
             misses += 1
         worst_miss_run = max(worst_miss_run, misses)
     assert worst_miss_run <= 1
+
+
+L0_HARUNA = os.path.join(SWB, "play_log/race_planner/haruna_full_g0.92.npz")
+
+
+@pytest.mark.skipif(not (os.path.isdir(HARUNA) and os.path.exists(L0_HARUNA)),
+                    reason="Haruna's course data or its L0 plan is not here")
+def test_re_solving_along_haruna_is_feasible_and_live():
+    """The live budget on a real road (the live planner's design, 4.4): stepping a second of
+    plan at a time from s 60 through Haruna's hairpins, each re-solve warm from the last plan,
+    under the live loop's 1.5 s budget, returns a feasible plan, 95 % of them within 1 s.
+    (Measured 2026-10-30: 56 of 56 feasible, p50 0.22 s, p95 0.54 s, p99 0.77 s.)"""
+    c = Car.from_spec(SPEC)
+    t = Track.from_swb_course(HARUNA, SurfaceTable.from_yaml(CLASSES), c).resampled(4.0)
+    l0 = np.load(L0_HARUNA)
+    cold = Window(c, warm=False)
+    w = Window(c, budget=1.5)
+
+    def v_end(i0):
+        return float(np.interp(t.s[min(i0 + w.N - 1, len(t.s) - 1)], l0["s"], l0["speed"]))
+
+    i = int(np.searchsorted(t.s, 60.0))
+    X, U = initial(cold.section(t, i), c, v_start=15.0)
+    x0 = X[:, 0].copy()
+    x0[0] = float(np.interp(t.s[i], l0["s"], l0["speed"]))
+    X[:, 0] = x0
+    plan = cold.solve(t, i, x0, v_end(i), X, U)
+    assert plan["ok"], plan["status"]
+    w.lam = cold.lam
+    solves, ok = [], []
+    for _ in range(40):
+        j = max(1, int(np.searchsorted(plan["t"], 1.0)))      # a second on along the plan
+        i = plan["i0"] + j
+        if i + w.N > len(t.s):
+            break
+        Xw, Uw = w.warm(plan, j, t)
+        new = w.solve(t, i, plan["X"][:, j], v_end(i), Xw, Uw)
+        solves.append(new["solve_s"])
+        ok.append(new["ok"] and new["defect"] < 1e-2 and new["violation"] < 1e-2)
+        if new["ok"]:
+            plan = new
+    assert len(solves) >= 35
+    assert np.mean(ok) >= 0.95
+    p95, p99 = np.percentile(solves, [95, 99])
+    assert p95 <= 1.0 and p99 <= 1.5, (p95, p99)

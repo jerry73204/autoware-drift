@@ -87,8 +87,13 @@ def dynamics(car, x, u, mu, acc, sliding=1.0):
         use = fx[i] / cap
         # the ellipse's share left for Fy, smooth through the limit (a kink there stalls the
         # optimiser's Newton steps exactly where a fast plan lives)
+        # (its positive part written without cancellation: l + sqrt(l^2 + e^2) = e^2 /
+        # (sqrt(l^2 + e^2) - l) for l < 0, else a far overdrawn wheel, |use| ~ 1e3 when an
+        # iterate unloads it, rounds the root to 0 and its derivative to NaN)
         left = 1.0 - use * use
-        fy = fy0 * ca.sqrt(0.5 * (left + ca.sqrt(left * left + ELLIPSE_EPS ** 2)))
+        root = ca.sqrt(left * left + ELLIPSE_EPS ** 2)
+        pos = ca.if_else(left > 0, left + root, ELLIPSE_EPS ** 2 / (root - left))
+        fy = fy0 * ca.sqrt(0.5 * pos)
         bx, by = c * fx[i] - s * fy, s * fx[i] + c * fy
         Fx, Fy = Fx + bx, Fy + by
         Mz = Mz + px * by - py * bx
