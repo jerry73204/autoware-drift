@@ -80,6 +80,23 @@ class Track:
              for k in ("x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")}
         return replace(self, s=s, **f)
 
+    def extended(self, length):
+        """An open track with a straight run-off `length` m past its end, on its last node's
+        heading, width and surface: what a window reaching past the finish plans on (a car
+        crosses the line at speed and has to stop somewhere)."""
+        assert not self.closed, "a closed track has no end"
+        step = float(self.s[-1] - self.s[-2])
+        d = np.arange(1, int(np.ceil(length / step)) + 1) * step
+        psi = float(self.psi[-1])
+        f = {k: np.concatenate([getattr(self, k), np.full(len(d), getattr(self, k)[-1])])
+             for k in ("z", "w_left", "w_right", "mu", "grade", "sliding")}
+        f["z"][len(self.s):] = self.z[-1] + float(self.grade[-1]) * d
+        return replace(self, s=np.concatenate([self.s, self.s[-1] + d]),
+                       x=np.concatenate([self.x, self.x[-1] + d * np.cos(psi)]),
+                       y=np.concatenate([self.y, self.y[-1] + d * np.sin(psi)]),
+                       psi=np.concatenate([self.psi, np.full(len(d), psi)]),
+                       kappa=np.concatenate([self.kappa, np.zeros(len(d))]), **f)
+
     def unrolled(self, laps):
         """A closed track as an open road `laps` laps long, its loop repeated end to end (s and
         psi running on): what the live loop drives, since a receding window never needs the loop

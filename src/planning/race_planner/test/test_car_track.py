@@ -93,3 +93,14 @@ def test_a_closed_track_unrolls_into_laps_end_to_end():
     assert u.psi[-1] - u.psi[0] == pytest.approx(3 * 2 * math.pi, abs=1e-6)
     assert np.max(np.abs(np.diff(u.psi))) < 0.02             # no jump at the seams
     assert np.max(np.hypot(np.diff(u.x), np.diff(u.y))) == pytest.approx(step, abs=0.01)
+
+
+def test_an_open_track_extends_straight_past_its_end():
+    t = Track(s=np.arange(0.0, 100.5, 1.0), x=np.arange(0.0, 100.5, 1.0), y=np.zeros(101),
+              z=np.zeros(101), psi=np.zeros(101), kappa=np.zeros(101), w_left=4 * np.ones(101),
+              w_right=4 * np.ones(101), mu=np.ones(101), closed=False)
+    e = t.extended(50.0)
+    assert e.s[-1] == pytest.approx(150.0)
+    assert np.allclose(np.diff(e.s), 1.0)
+    assert e.x[-1] == pytest.approx(150.0) and e.y[-1] == pytest.approx(0.0)
+    assert np.all(e.kappa[101:] == 0) and np.all(e.w_left[101:] == 4)
