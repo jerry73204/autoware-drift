@@ -8,30 +8,38 @@ taken at the arclength s the prediction reaches (contouring), not at a clock: th
 behind or ahead of the plan's timing, and a new plan then moves the reference, not the steering
 (the hand-over of 4.4). The plan's start time is not needed for that; it only tells a new plan.
 
-What it predicts with. axle.py's car (steering and one acceleration request; the ECU's split;
-PhysX's lateral tyre with the friction ellipse), in time, not in s: the spatial form divides
-by the car's progress and breaks in a spin (4.5's revision), the temporal one keeps working.
-States s, n, xi, vx, vy, r, delta; inputs delta's rate and the request a. The tyre loads are
-taken at the accelerations the last solution predicted for each stage (shifted one tick): the
-fixed point L1 solves for exactly, reached here across ticks.
+What it predicts with. L1's car exactly (axle.py with every tyre PhysX's own on its slip, the
+ECU's brake blending; window.node_functions(tyres=True)), in time, not in s: the spatial form
+divides by the car's progress and breaks in a spin (4.5's revision), the temporal one keeps
+working. So L1 and L2 agree on what the car can do (with the ellipse, L2 would not brake into a
+drift the plan made with PhysX's tyres, and the MIL car left the road). States s, n, xi, vx, vy,
+r, delta; inputs delta's rate and the request a, which are what goes to the car, and the
+wheels' peripheral speeds (rear axle, front left, front right), internal: the tyres' force
+balances (the rear pair's force is the ECU's for a, each front's its brake share) are hard rows,
+and a proximal term (W_PROX) keeps their QPs well posed. The tyre loads are taken at the
+accelerations the last solution predicted for each stage (shifted one tick): the fixed point
+L1 solves for exactly, reached here across ticks.
 
-The car's limits (SR3), as hard constraints: steering lock and rate, the motor's torque and
-power, each wheel's brake (the rear's with the regen); each wheel's longitudinal force within
-its grip (|use| <= 1) softly, at the full grip (L1 plans at 0.92, the difference is this
-layer's authority, 4.4); the road's edges softly too, with a slack whose weight is far above
-any tracking error's: a prediction that cannot stay inside must still give an input.
+The car's limits (SR3): steering lock and rate as hard bounds; the motor's torque and power and
+each wheel's brake, and the slips' bounds, softly (hard, they met the hard force balances in
+QPs with no solution; the request is clamped to them on its way out); each wheel's longitudinal
+force within its grip (|use| <= 1) softly, at the full grip (L1 plans at 0.92, the difference
+is this layer's authority, 4.4); the road's edges softly too, with a slack whose weight is far
+above any tracking error's: a prediction that cannot stay inside must still give an input.
 
 How it solves (real-time iteration, Diehl). One Gauss-Newton SQP step per tick from the last
 solution shifted by a tick: the problem's residuals and constraints are linearised (one CasADi
 Function, built once, C-compiled when a compiler is there) and the QP solved by HPIPM's
 Riccati-structured interior point (the decision vector in its stage order, so CasADi hands it
-the OCP structure). About 1.3 ms a tick in CasADi's virtual machine (25 stages of 0.04 s);
-C-generating the linearisation saved 0.3 ms for a 35 s compile, so it is not done; acados would
-do the same in generated C, and is not needed yet.
+the OCP structure). About 1.8 ms a tick (p99 3.5 ms) in CasADi's virtual machine (25 stages of
+0.04 s), 6-11 HPIPM iterations; acados would do the same in generated C, and is not needed yet.
 
-When it fails (section 5): `LqrTracker`, a time-varying LQR on the same model linearised along
-the plan, unconstrained and clamped to the limits, is this tick's input when the QP fails or the
-tick overruns its budget.
+When it fails (section 5): `LqrTracker`, a time-varying LQR linearised along the plan,
+unconstrained and clamped to the limits, is this tick's input when the QP fails or the tick
+overruns its budget. It keeps the ellipse model: its inputs are the car's own two, and L1's
+model needs the wheels' speeds solved from their force balances first (an implicit function
+per stage per tick); as a fallback for single ticks near the plan the ellipse serves (every
+other tick on the LQR stays on the road, test_tracker).
 """
 import math
 import time
@@ -41,10 +49,11 @@ import numpy as np
 
 from race_planner import axle
 from race_planner.ocp import STEER_RATE
-from race_planner.window import node_functions
+from race_planner.window import node_functions, wheel_speeds
 
 G = 9.81
-NX, NU, NS = 8, 2, 2            # states s n xi vx vy r delta a_last; inputs rate a; slacks
+NX, NU, NS = 8, 2, 3            # states s n xi vx vy r delta a_last; inputs rate a; slacks
+NWHEEL = 3                      # the NMPC's internal controls: the wheels' peripheral speeds
 NP = 6                          # stage parameters: kappa mu grade sliding ax_load ay_load
 NR = 6                          # references per node: n xi vx vy r delta
 # Tracking scales: the error that costs as much as one unit (the cost is the error over its
@@ -56,6 +65,12 @@ SCALE_RATE, SCALE_A, SCALE_JERK = 1.5, 3.0, 25.0          # rad/s; m/s^2 off the
 TERMINAL = 10.0                 # the last node's weight: where the car is in a second counts
 EDGE_QUAD, EDGE_LIN = 1e4, 1e3  # the edge slack's cost per m^2, per m: far above tracking
 USE_QUAD, USE_LIN = 1e3, 1e2    # the grip slack's (in shares of the grip)
+W_PROX = 1.0                    # m/s: the wheels' speeds' step that costs as much as one unit
+# the slack of the actuators' rows (drive, power, the brakes; in their limits) and the tyres'
+# slip bounds: those are soft, the tyres' force balances hard. Soft balances let the solver set
+# the tyres where tracking wanted them and the request anywhere (it drove +5 m/s^2 into the R20
+# bend where the plan braked at -7). The request is clamped to the car's limits on its way out.
+BAL_QUAD, BAL_LIN = 1e4, 1e3
 EDGE_MARGIN = 0.1               # m inside the edge (L1 keeps 0.3: the tracker's room is the rest)
 A_BOX = (-20.0, 15.0)           # m/s^2: a bound for the QP only; the car's limits are the rows
 BUDGET = 0.010                  # s per tick (the design's 10 ms at 50 Hz)
@@ -65,13 +80,20 @@ LQR_DRIVE_MARGIN = 0.5          # m/s^2: the fallback's drive beyond the plan's 
 LQR_SCALE_X = np.array([0.25, 0.1, 0.7, 0.4, 0.15, 0.3])
 
 
-def _dynamics(car, grip=1.0):
+def _dynamics(car, grip=1.0, tyres=False):
     """f(x, u, p) -> xdot in time; acc(x, u, p) -> the body's (ax, ay); g(x, u, p) -> the car's
-    limit rows (use x4, drive, power, front brake, rear brake) with their bounds."""
-    x, u, p = ca.SX.sym("x", 7), ca.SX.sym("u", NU), ca.SX.sym("p", NP)
+    limit rows (use x4, drive, power, front brake, rear brake) with their bounds.
+
+    With `tyres`, L1's car exactly (window.node_functions(tyres=True)): u carries the wheels'
+    peripheral speeds too (rear axle, front left, front right), every tyre is PhysX's on its
+    slip, and g adds L1's rows for them (the rear pair's force is the ECU's, each front's its
+    brake share; each slip ratio bounded), all hard."""
+    nu = NU + (NWHEEL if tyres else 0)
+    x, u, p = ca.SX.sym("x", 7), ca.SX.sym("u", nu), ca.SX.sym("p", NP)
     s, n, xi, vx, vy, r, delta = (x[i] for i in range(7))
     kappa, mu, grade, sliding = p[0], grip * p[1], p[2], p[3]
-    o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [p[4], p[5]], sliding)
+    o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [p[4], p[5]], sliding,
+                      w_rear=u[2] if tyres else None, w_front=(u[3], u[4]) if tyres else None)
     sin_t = grade / ca.sqrt(1 + grade * grade)
     sdot = (vx * ca.cos(xi) - vy * ca.sin(xi)) / (1 - n * kappa)
     xdot = ca.vertcat(sdot, vx * ca.sin(xi) + vy * ca.cos(xi), r - kappa * sdot,
@@ -80,10 +102,11 @@ def _dynamics(car, grip=1.0):
     f = ca.Function("f", [x, u, p], [xdot])
     acc = ca.Function("acc", [x, u, p], [ca.vertcat(*o["acc"])])
     # the limit rows are L1's (window.node_functions), at this layer's grip
-    _, g1, lbg, ubg, _ = node_functions(car)
+    _, g1, lbg, ubg, _ = node_functions(car, tyres=tyres)
     x6 = ca.vertcat(vx, vy, r, n, xi, delta)
-    rows = g1(x6, ca.vertcat(u[0], u[1], p[4], p[5]), ca.vertcat(kappa, mu, grade, sliding))
-    sel = list(range(6, 14))
+    rows = g1(x6, ca.vertcat(u[0], u[1], p[4], p[5], *([u[2], u[3], u[4]] if tyres else [])),
+              ca.vertcat(kappa, mu, grade, sliding))
+    sel = list(range(6, 14)) + (list(range(15, len(lbg))) if tyres else [])
     g = ca.Function("g", [x, u, p], [rows[sel]])
     return f, acc, g, np.array(lbg, float)[sel], np.array(ubg, float)[sel]
 
@@ -128,6 +151,14 @@ class _Plan:
         ref = np.vstack([np.interp(s, self.s, X[i]) for i in (3, 4, 0, 1, 2, 5)])
         U = np.vstack([np.interp(s, self.su, self.U[i]) for i in range(4)])
         return ref, U[1], U[2:4], U[0]
+
+    @property
+    def has_wheels(self):
+        return self.U.shape[0] >= 7
+
+    def wheels(self, s):
+        """The plan's wheel speeds (rear axle, front left, front right) at s."""
+        return np.vstack([np.interp(s, self.su, self.U[i]) for i in (4, 5, 6)])
 
 
 def _track_at(track, s):
@@ -240,11 +271,12 @@ class Tracker:
         self.N = N = int(round(horizon / dt))
         self.rate = car.steer_rate_max or STEER_RATE
         self.half = 0.5 * car.width
-        f, acc, g, lbg, ubg = _dynamics(car, grip)
+        f, acc, g, lbg, ubg = _dynamics(car, grip, tyres=True)
+        self.nu = nu = NU + NWHEEL
         self.acc = acc.map(N, "serial")
         # the decision vector, stage by stage: x_k u_k sl_k, then x_N (HPIPM's own order)
         xs = [ca.SX.sym(f"x{k}", NX) for k in range(N + 1)]
-        us = [ca.SX.sym(f"u{k}", NU) for k in range(N)]
+        us = [ca.SX.sym(f"u{k}", nu) for k in range(N)]
         sls = [ca.SX.sym(f"sl{k}", NS) for k in range(N)]
         w = ca.vertcat(*[ca.vertcat(xs[k], us[k], sls[k]) for k in range(N)], xs[N])
         P = ca.SX.sym("P", NP, N)           # stage parameters
@@ -253,6 +285,10 @@ class Tracker:
         WL, WR = ca.SX.sym("WL", N), ca.SX.sym("WR", N)   # the free width at x_0 .. x_N-1
         par = ca.vertcat(ca.vec(P), ca.vec(REF), AREF, WL, WR)
         res, lin, cons, lbc, ubc = [], 0, [], [], []
+        # the limit rows (see _dynamics): use x4, drive, power, the brakes x2, then the tyres':
+        # rear balance, its slips x2, front balances x2, their slips x2
+        soft, bal = [0, 1, 2, 3], [4, 5, 6, 7, 9, 10, 13, 14]
+        hard = [i for i in range(len(lbg)) if i not in soft + bal]
         isx = 1.0 / SCALE_X
         for k in range(N):
             xk, uk, sk, xn = xs[k], us[k], sls[k], xs[k + 1]
@@ -263,15 +299,21 @@ class Tracker:
             e = xn[1:7] - REF[:, k]
             wk = TERMINAL if k == N - 1 else 1.0
             res += [math.sqrt(wk) * e[i] * isx[i] for i in range(NR)]
-            res += [math.sqrt(EDGE_QUAD) * sk[0], math.sqrt(USE_QUAD) * sk[1]]
-            lin += EDGE_LIN * sk[0] + USE_LIN * sk[1]
+            res += [math.sqrt(EDGE_QUAD) * sk[0], math.sqrt(USE_QUAD) * sk[1],
+                    math.sqrt(BAL_QUAD) * sk[2]]
+            lin += EDGE_LIN * sk[0] + USE_LIN * sk[1] + BAL_LIN * sk[2]
             # the stage's rows in HPIPM's order: its dynamics, then its own constraints
             cons.append(ca.vertcat(_rk4(f, xk[:7], uk, P[:, k], dt), uk[1]) - xn)
             lbc.append(np.zeros(NX)); ubc.append(np.zeros(NX))
             gk = g(xk[:7], uk, P[:, k])
-            cons += [gk[:4] - sk[1], gk[:4] + sk[1], gk[4:]]
-            lbc += [-np.inf * np.ones(4), lbg[:4], lbg[4:]]
-            ubc += [ubg[:4], np.inf * np.ones(4), ubg[4:]]
+            # soft: the grip use (sk[1]), the actuators' rows and the slips' bounds (sk[2]);
+            # hard: the tyres' force balances (see BAL_QUAD)
+            gs, gb, gh = gk[soft], gk[bal], gk[hard]
+            cons += [gs - sk[1], gs + sk[1], gb - sk[2], gb + sk[2], gh]
+            lbc += [-np.inf * np.ones(len(soft)), lbg[soft], -np.inf * np.ones(len(bal)),
+                    lbg[bal], lbg[hard]]
+            ubc += [ubg[soft], np.inf * np.ones(len(soft)), ubg[bal], np.inf * np.ones(len(bal)),
+                    ubg[hard]]
             cons += [xk[1] - sk[0], xk[1] + sk[0]]     # the edges at x_k: the stage's own
             lbc += [[-np.inf], [0.0]]
             ubc += [[0.0], [np.inf]]
@@ -279,19 +321,27 @@ class Tracker:
         C = ca.vertcat(*cons)
         # the edges' bounds move with the free width (parameters): those rows less their bound
         shift = []
+        n_rows = 2 * (len(soft) + len(bal)) + len(hard)   # the soft ones both ways
         for k in range(N):
-            shift += [ca.SX.zeros(NX), ca.SX.zeros(12), WL[k], -WR[k]]
+            shift += [ca.SX.zeros(NX), ca.SX.zeros(n_rows), WL[k], -WR[k]]
         C = C - ca.vertcat(*shift)
         self.lbc = np.concatenate([np.atleast_1d(np.asarray(v, float)) for v in lbc])
         self.ubc = np.concatenate([np.atleast_1d(np.asarray(v, float)) for v in ubc])
         J, Jc = ca.jacobian(R, w), ca.jacobian(C, w)
         nw = w.numel()
-        H = ca.mtimes(J.T, J) + 1e-6 * ca.SX.eye(nw)
+        # a proximal term on the wheels' speeds (Levenberg-Marquardt on them alone): nothing in
+        # the cost curves them, and near a tyre's peak their force balance barely moves with
+        # them, so without it one QP in twenty was too ill-posed for HPIPM
+        damp = np.full(nw, 1e-6)
+        st = NX + nu + NS
+        for k in range(N):
+            damp[k * st + NX + NU:k * st + NX + nu] = 1.0 / W_PROX ** 2
+        H = ca.mtimes(J.T, J) + ca.diag(ca.DM(damp))
         grad = ca.mtimes(J.T, R) + ca.gradient(lin, w)
         self.qp = ca.Function("rti_qp", [w, par], [H, grad, C, Jc])
         opts = {"error_on_fail": False, "print_problem": False}
         if qpsol == "hpipm":
-            opts.update({"hpipm": {"iter_max": 50, "mode": "balance", "res_g_max": 1e-5,
+            opts.update({"hpipm": {"iter_max": 100, "mode": "balance", "res_g_max": 1e-5,
                                    "res_b_max": 1e-6, "res_d_max": 1e-6, "res_m_max": 1e-6}})
         elif qpsol == "qrqp":
             opts.update({"print_iter": False, "print_header": False, "print_info": False})
@@ -299,9 +349,12 @@ class Tracker:
         self.lqr = LqrTracker(car, track, horizon=horizon, dt=dt, grip=grip, tick=tick)
         # the variables' box: the lock and the rate, a QP-only request bound, slacks >= 0
         lb, ub = [], []
+        wmax = car.wheel_speed_max or np.inf
         for k in range(N):
-            lb += [-np.inf] * 6 + [-car.steer_max, -np.inf, -self.rate, A_BOX[0], 0.0, 0.0]
-            ub += [np.inf] * 6 + [car.steer_max, np.inf, self.rate, A_BOX[1], np.inf, np.inf]
+            lb += [-np.inf] * 6 + [-car.steer_max, -np.inf, -self.rate, A_BOX[0], 0.0, 0.0, 0.0]
+            lb += [0.0] * NS
+            ub += [np.inf] * 6 + [car.steer_max, np.inf, self.rate, A_BOX[1], wmax, np.inf, np.inf]
+            ub += [np.inf] * NS
         lb += [-np.inf] * 6 + [-car.steer_max, -np.inf]
         ub += [np.inf] * 6 + [car.steer_max, np.inf]
         self.lbw, self.ubw = np.array(lb), np.array(ub)
@@ -322,6 +375,9 @@ class Tracker:
         N, dt = self.N, self.dt
         if self.W is None:
             X, U, acc = _plan_states(plan, x0[0], x0, N, dt)
+            X6 = X[[3, 4, 5, 1, 2, 6], :N]
+            U = np.vstack([U, plan.wheels(X[0, :N]) if plan.has_wheels
+                           else wheel_speeds(self.car, X6, U[1])])
             X = np.vstack([X, np.concatenate([[x0[7]], U[1]])])
             return X, U, acc
         X, U, acc = self.W
@@ -329,7 +385,7 @@ class Tracker:
         tq = np.minimum(tk + self.tick, tk[-1])
         Xs = np.vstack([np.interp(tq, tk, X[i]) for i in range(NX)])
         tu = tk[:-1]
-        Us = np.vstack([np.interp(tq[:-1], tu, U[i]) for i in range(NU)])
+        Us = np.vstack([np.interp(tq[:-1], tu, U[i]) for i in range(self.nu)])
         accs = np.vstack([np.interp(tq[:-1], tu, acc[i]) for i in range(2)])
         # s past the last node: extrapolated at its speed, so the tail's references move on
         Xs[0, -1] = X[0, -1] + max(X[3, -1], 0.0) * self.tick
@@ -352,10 +408,10 @@ class Tracker:
         return np.concatenate([Z.ravel(order="F"), X[:, N]])
 
     def _unpack(self, w):
-        N, st = self.N, NX + NU + NS
+        N, st = self.N, NX + self.nu + NS
         Z = w[:N * st].reshape(st, N, order="F")
         X = np.hstack([Z[:NX], w[N * st:].reshape(NX, 1)])
-        return X, Z[NX:NX + NU], Z[NX + NU:]
+        return X, Z[NX:NX + self.nu], Z[NX + self.nu:]
 
     # -- one tick ---------------------------------------------------------------------------
     def step(self, state, plan, plan_t0=None):
