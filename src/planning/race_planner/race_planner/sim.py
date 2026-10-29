@@ -13,7 +13,11 @@ Isaac judges them (the live planner's design, section 6).
   and wheels at 8 substeps of it, as PhysX's vehicle.
 - The road: the track's friction, sliding share and grade at the car's nearest node.
 - A wrong plant on request: grip and load transfer scaled (mu_scale, transfer_scale), the
-  plan's model left as it is.
+  plan's model left as it is; and local friction patches the planner's map does not know
+  (`patches`: (s_from, s_to, scale) each, the friction there times scale), as Isaac's M6 test
+  puts one at a hairpin's entry.
+- The car's own friction estimate, the ECU's (sim_vehicle_ecu.estimator), in the state as
+  `mu_ratio`: the estimate over the tyre's design friction, as Isaac's car reports it.
 
 sim_vehicle_ecu is found beside this repository's checkout of the superproject
 (SWB/src/sim_vehicle_ecu, SWB from the environment, default ~/repos/carla-scenario-bridge).
@@ -45,13 +49,14 @@ class Plant:
     """The car on `track`. State: x, y, psi (map frame, the CoM), vx, vy, r (body), the four
     wheels' spin w (rad/s) and the steering's actual angle."""
 
-    def __init__(self, car, spec_path, track, mu_scale=1.0, transfer_scale=1.0):
+    def __init__(self, car, spec_path, track, mu_scale=1.0, transfer_scale=1.0, patches=()):
         ecu = _ecu_module()
         doc = yaml.safe_load(open(spec_path))
         self.ecu_mod = ecu
         self.ecu = ecu.Ecu(ecu.Calibration.from_spec(doc))
         self.car = replace(car, transfer_height=car.transfer_height * transfer_scale)
         self.track, self.mu_scale = track, mu_scale
+        self.patches = [tuple(map(float, p)) for p in patches]
         w = doc["wheels"] if "wheels" in doc else {}
         m_wheel = float(w.get("mass", 22.0))
         self.I_wheel = 0.5 * m_wheel * self.car.r_wheel ** 2
@@ -83,6 +88,13 @@ class Plant:
         self.ecu.reset() if hasattr(self.ecu, "reset") else None
         return self.state()
 
+    def patch(self, s):
+        """The friction's scale at s from the patches (1 off them)."""
+        for lo, hi, scale in self.patches:
+            if lo <= s <= hi:
+                return scale
+        return 1.0
+
     def nearest(self):
         tr = self.track
         lo, hi = max(0, self.i - 20), min(len(tr.s), self.i + 60)
@@ -103,7 +115,7 @@ class Plant:
                 "vx": float(self.v[0]), "vy": float(self.v[1]), "r": float(self.v[2]),
                 "delta": self.delta, "x": self.x, "y": self.y, "psi": self.psi,
                 "w": self.w.copy(), "ax": float(self.acc[0]), "ay": float(self.acc[1]),
-                "i": i}
+                "i": i, "mu_ratio": self.ecu.estimator.friction / self.ecu.c.tire_friction}
 
     def step(self, accel, tire_angle, velocity=60.0, dt=1.0 / ECU_RATE):
         """Advance dt with the vehicle interface's request held: the ECU's 60 Hz steps that fall
@@ -120,7 +132,7 @@ class Plant:
             self.delta = float(act.tire_angle)
             h = 1.0 / ECU_RATE / SUBSTEPS
             i = self.nearest()
-            mu = float(self.track.mu[i]) * self.mu_scale
+            mu = float(self.track.mu[i]) * self.mu_scale * self.patch(float(self.track.s[i]))
             sl = float(self.track.sliding[i])
             grade = float(self.track.grade[i])
             for _ in range(SUBSTEPS):
