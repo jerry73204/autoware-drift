@@ -5,9 +5,10 @@ manoeuvres.py, EGO_RIG=drift_mustang.rig.yaml, PADS=dry, 60 Hz, 2026-10-29 on 24
 wheel-frames of the lateral and longitudinal sweeps (wheel, kappa, tan alpha, Fz, Fx, Fy; PhysX's
 slips); `circle`, the 40 m constant-radius ramp every 7.5 s (CoM speed, radius, tyre angle, CoM
 sideslip; Isaac logs its sideslip at the rear axle, moved here by r lr); `step`, the 5 deg step at
-40 km/h (speed, angle, steady yaw rate, steady ay). The circle and the step are from the run with
-sim_vehicle_ecu d68637a, whose locked axle holds as a spool (swb docs/issues/022; the run before
-it, nearly open, is play_log/model_check/dry1), so they check the spec's own locked axle.
+40 km/h (speed, angle, steady yaw rate, steady ay). The tyre rows are from the first run
+(play_log/model_check/dry1); the circle and the step from dry3, with sim_vehicle_ecu d68637a,
+whose locked axle holds as a spool (swb docs/issues/022), and aib abaf103, whose tyre forces act
+at the contact patch (swb docs/issues/023), so they check the spec's own car.
 """
 import dataclasses
 import math
@@ -80,31 +81,31 @@ def test_past_the_peak_the_tyre_falls_to_the_sliding_share():
 
 
 def test_steady_cornering_matches_isaac_s_circle():
-    """Steering and sideslip on the 40 m ramp to 0.94 g, with Isaac's load transfer (the tyre
-    forces at the wheel centre, swb issue 023) and asphalt's sliding share. With a real car's
-    transfer the model's rear saturates first, 2.6 deg more sideslip at 0.94 g."""
-    car = Car.from_spec(SPEC).in_isaac()
+    """Steering and sideslip on the 40 m ramp, with asphalt's sliding share, to 0.76 g: Isaac's
+    car holds 0.75 g (dry3's ay_max_held); its last two rows, 0.85 and 0.93 g, are on the way out
+    of the circle, not steady (there the model steers 0.1 and 0.4 deg less)."""
+    car = Car.from_spec(SPEC)
     for V, R, tyre_angle, beta in ISAAC["circle"]:
+        if V * V / R > 0.8 * 9.81:
+            continue
         s = steady_state(car, MU, speed=V, radius=R, sliding=0.8)
         assert s["ok"]
         assert math.degrees(s["delta"] - tyre_angle) == pytest.approx(0.0, abs=0.1), V
         assert math.degrees(s["beta"] - beta) == pytest.approx(0.0, abs=0.7), V
 
 
-def test_isaac_s_load_transfer_is_a_third_of_a_real_car_s():
-    """Measured on the sweeps (play_log/model_check/dry2): 70 N per m/s^2 per axle sideways
-    and 168 front to rear, against m ay h / t / 2 = 219 and 2 m ax h / L = 482."""
+def test_load_transfer_is_a_real_car_s():
+    """Isaac's sweeps (play_log/model_check/dry3, aib abaf103): 221 N per m/s^2 per axle
+    sideways and 513 front to rear; m h / t / 2 = 219 and 2 m h / L = 482."""
     car = Car.from_spec(SPEC)
-    isaac = car.in_isaac()
-    lat = lambda c: (model.loads(c, 0.0, 1.0)[1] - model.loads(c, 0.0, 1.0)[0]) / 2  # noqa: E731
-    lon = lambda c: sum(model.loads(c, -1.0, 0.0)[:2]) - sum(model.loads(c, -1.0, 0.0)[2:])  # noqa: E731
-    assert float(lat(car)) == pytest.approx(219.4, rel=0.01)
-    assert float(lat(isaac)) == pytest.approx(70.1, rel=0.05)
-    assert float(lon(isaac)) == pytest.approx(168.1, rel=0.05)
+    lat = (model.loads(car, 0.0, 1.0)[1] - model.loads(car, 0.0, 1.0)[0]) / 2
+    lon = sum(model.loads(car, -1.0, 0.0)[:2]) - sum(model.loads(car, -1.0, 0.0)[2:])
+    assert float(lat) == pytest.approx(221.1, rel=0.02)
+    assert float(lon) == pytest.approx(513.1, rel=0.07)
 
 
 def test_steady_step_matches_isaac_s():
-    car = Car.from_spec(SPEC).in_isaac()
+    car = Car.from_spec(SPEC)
     V, delta, r, ay = ISAAC["step"]
     s = steady_state(car, MU, speed=V, delta=delta)
     assert s["ok"]
