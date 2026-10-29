@@ -43,15 +43,18 @@ G = 9.81
 REG_STEER, REG_ACCEL = 1e-2, 1e-4
 END_SLIP, END_HEADING = 0.15, 0.35      # the window's last node: vy / vx, xi (rad)
 DROP = 0.2                              # the share of a plan's end not reused as a warm start
-NZ = 11                                 # a stage's variables: x (6), u (4), edge slack (1)
+NU = 5                                  # a stage's controls: rate a ax ay, the rear's speed
+NZ = 12                                 # a stage's variables: x (6), u (5), edge slack (1)
+KAPPA_MAX = 1.0                         # the rear tyres' slip ratio, either way
 EDGE_PENALTY = 10.0                     # s per metre past the road's edge (less the margin)
 CACHE = os.environ.get("RACE_PLANNER_CACHE", os.path.expanduser("~/.cache/race_planner"))
 BLEND = 10                              # nodes over which a warm start's tail joins the plan
 X_SCALE = np.array([20.0, 2.0, 1.0, 3.0, 0.3, 0.3])
-U_SCALE = np.array([1.0, 10.0, 10.0, 10.0])
+U_SCALE = np.array([1.0, 10.0, 10.0, 10.0, 20.0])
 TRACK_FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")
 ROWS = ("ax", "ay", "fz_fl", "fz_fr", "fz_rl", "fz_rr", "use_fl", "use_fr", "use_rl", "use_rr",
-        "drive", "power", "brake_front", "brake_rear", "sdot")
+        "drive", "power", "brake_front", "brake_rear", "sdot", "rear_balance", "kappa_rl",
+        "kappa_rr")
 
 
 NLP_FUNCTIONS = ("nlp", "nlp_f", "nlp_g", "nlp_grad_f", "nlp_jac_g", "nlp_grad", "nlp_hess_l")
@@ -91,12 +94,19 @@ def _load(src, key, opts):
     return ca.nlpsol("l1", "ipopt", lib, opts)
 
 
-def node_functions(car):
-    """f(x, u, p) -> (dx/ds, dt/ds); g(x, u, p) -> path constraints within (lbg, ubg)."""
-    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", 4), ca.SX.sym("p", 4)   # kappa mu grade sliding
+def node_functions(car, rear_tyre=False):
+    """f(x, u, p) -> (dx/ds, dt/ds); g(x, u, p) -> path constraints within (lbg, ubg).
+
+    u = (delta's rate, a, ax, ay), and with rear_tyre the rear axle's peripheral speed w too:
+    the rear tyres are then PhysX's own on their slip (axle.py), with three more rows: the two
+    tyres make the ECU's rear force (in the car's weight), and each one's slip ratio within
+    KAPPA_MAX (past it PhysX's tyre is far into its slide; a plan has no business there)."""
+    nu = 5 if rear_tyre else 4
+    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", nu), ca.SX.sym("p", 4)   # kappa mu grade sliding
     vx, vy, r, n, xi, delta = (x[i] for i in range(6))
     kappa, mu, grade = p[0], p[1], p[2]
-    o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [u[2], u[3]], p[3])
+    o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [u[2], u[3]], p[3],
+                      w_rear=u[4] if rear_tyre else None)
     sin_t = grade / ca.sqrt(1 + grade * grade)
     dvx = o["dx"][0] - G * sin_t * ca.cos(xi)
     dvy = o["dx"][1] + G * sin_t * ca.sin(xi)
@@ -120,6 +130,10 @@ def node_functions(car):
                    sdot)
     lbg = [0, 0, 0, 0, 0, 0, -1, -1, -1, -1, 0, -ca.inf, 0, -ca.inf, 0.5]
     ubg = [0, 0, ca.inf, ca.inf, ca.inf, ca.inf, 1, 1, 1, 1, 1, 1, 1, 2, ca.inf]
+    if rear_tyre:
+        g = ca.vertcat(g, o["rear_balance"] / mg, *o["kappa"])
+        lbg += [0, -KAPPA_MAX, -KAPPA_MAX]
+        ubg += [0, KAPPA_MAX, KAPPA_MAX]
     out = ca.Function("out", [x, u, p], [ca.vertcat(*o["fx"]), ca.vertcat(*o["fy"]),
                                          ca.vertcat(*o["fz"]), ca.vertcat(*o["use"]),
                                          ca.vertcat(*o["alpha"])])
@@ -137,12 +151,26 @@ def rk4(f, x, u, p, h):
 def controls_for(X, s, car):
     """Controls consistent with states X (6 x n) along s: the steering rate from delta, the
     request from the speed's change (plus grade's share, left to the solver), the accelerations
-    of the speed and the turn. A warm start for a stretch the last plan did not cover."""
+    of the speed and the turn, and the rear axle's speed for the force the request puts there
+    (the slip that force takes at the tyres' longitudinal stiffness). A warm start for a stretch
+    the last plan did not cover."""
     vx, vy, r, n, xi, delta = X
     ds = np.gradient(s)
     dvds = np.gradient(vx) / ds
     a = dvds * vx
-    return np.vstack([np.gradient(delta) / ds * vx, a, a, vx * r])[:, :-1]
+    return np.vstack([np.gradient(delta) / ds * vx, a, a, vx * r,
+                      rear_speed(car, vx, a)])[:, :-1]
+
+
+def rear_speed(car, vx, a):
+    """The rear axle's peripheral speed that makes the rear force the request a asks of the ECU
+    at speed vx, in a straight line (the slip at the tyres' stiffness, within KAPPA_MAX / 2)."""
+    vx = np.asarray(vx, float)
+    F = car.m * np.asarray(a, float) + car.drag * vx * vx + car.roll * car.m * G
+    share = car.lr / car.wheel_base
+    rear = np.where(F > 0, F, (1 - share) * F)
+    kap = np.clip(rear / (2 * car.long_stiff_value * G), -0.5 * KAPPA_MAX, 0.5 * KAPPA_MAX)
+    return vx + kap * (np.abs(vx) + model.SLIP_LONG_OFFSET)
 
 
 class Window:
@@ -157,18 +185,20 @@ class Window:
     stage's own block. An iteration then costs about 4 ms (12 before), half of it MUMPS's.
     Warm re-solves along Haruna: 56 of 56 feasible, p50 0.22 s, p95 0.54 s, p99 0.77 s, the
     plan's time within 0.06 % of a tightly converged IPOPT on the old form on average (2.1 % at
-    worst, another local optimum)."""
+    worst, another local optimum). With the rear tyres' own slip (a fifth control, three more
+    rows): 57 of 59, p50 0.21 s, p95 0.72 s, p99 1.1 s; the plan's sideslip on the gentle bend
+    at s 90-160 within 0.3 deg of L0's (it was 6 deg off)."""
 
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
                  tol=1e-3, budget=None, warm=True, compile=True, ipopt=None):
         self.car, self.ds, self.grip, self.margin = car, ds, grip, margin
         self.N = N = int(round(length / ds)) + 1
         self.M = M = N - 1
-        self.f, self.g, lbg, ubg, self.out = node_functions(car)
+        self.f, self.g, lbg, ubg, self.out = node_functions(car, rear_tyre=True)
         self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
         ng = len(lbg)
         # one stage in the scaled variables
-        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", 4), ca.SX.sym("p", 4)
+        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", NU), ca.SX.sym("p", 4)
         x, u = xs * X_SCALE, us * U_SCALE
         xn, dt = rk4(self.f, x, u, p, ds)
         stage = ca.Function("l1_stage", [xs, us, p], [xn / X_SCALE, dt, self.g(x, u, p)])
@@ -178,7 +208,7 @@ class Window:
         Pw = ca.MX.sym("p", 6, M)                # kappa mu grade sliding, the free width l, r
         Pp = Pw[:4, :]
         Z = ca.reshape(W[:NZ * M], NZ, M)
-        Xk, Uk, Ek, xN = Z[:6, :], Z[6:10, :], Z[10, :], W[NZ * M:]
+        Xk, Uk, Ek, xN = Z[:6, :], Z[6:6 + NU, :], Z[6 + NU, :], W[NZ * M:]
         xn_s, dts, G = stage.map(M)(Xk, Uk, Pp)
         n = Xk[3, :] * X_SCALE[3]
         rows = ca.vertcat(xn_s - ca.horzcat(Xk[:, 1:], xN), G,     # each stage's, together
@@ -210,7 +240,7 @@ class Window:
         # 1.8 ms an iteration; each stage's own block is one pass of one stage
         lam_f, lam_g = ca.MX.sym("lam_f"), ca.MX.sym("lam_g", per * M + 2)
         zs, ps, lf, lm = ca.SX.sym("z", NZ), ca.SX.sym("p", 4), ca.SX.sym("lf"), ca.SX.sym("l", 6 + ng)
-        o = stage(zs[:6], zs[6:10], ps)
+        o = stage(zs[:6], zs[6:6 + NU], ps)
         Hk, _ = ca.hessian(lf * o[1] + ca.dot(lm[:6], o[0]) + ca.dot(lm[6:], o[2]), zs)
         hs = ca.Function("l1_stage_hess", [zs, ps, lf, lm], [Hk])
         Hm = hs.map(M)(Z, Pp, lam_f, ca.reshape(lam_g[:per * M], per, M)[:6 + ng, :])
@@ -243,12 +273,12 @@ class Window:
         hi[0, N - 1] = min(hi[0, N - 1], v_end)
         lo[4, N - 1], hi[4, N - 1] = -END_HEADING, END_HEADING
         lo[:, 0] = hi[:, 0] = x0                            # the window starts at the state
-        ulo = np.tile([-rate, -inf, -inf, -inf], (M, 1)).T
-        uhi = np.tile([rate, inf, inf, inf], (M, 1)).T
+        ulo = np.tile([-rate, -inf, -inf, -inf, 0.0], (M, 1)).T
+        uhi = np.tile([rate, inf, inf, inf, car.wheel_speed_max or inf], (M, 1)).T
         return self.pack(lo, ulo, 0.0), self.pack(hi, uhi, inf)
 
     def pack(self, X, U, e=0.0):
-        """The scaled decision vector from X (6 x N), U (4 x M) and the edge slack e."""
+        """The scaled decision vector from X (6 x N), U (5 x M) and the edge slack e."""
         Z = np.vstack([X[:, :self.M] / X_SCALE[:, None], U / U_SCALE[:, None],
                        np.full(self.M, e)])
         return np.concatenate([Z.ravel(order="F"), X[:, self.M] / X_SCALE])
@@ -257,7 +287,7 @@ class Window:
         M = self.M
         Z = np.asarray(w).ravel()[:NZ * M].reshape(NZ, M, order="F")
         X = np.hstack([Z[:6] * X_SCALE[:, None], (np.asarray(w).ravel()[NZ * M:] * X_SCALE)[:, None]])
-        return X, Z[6:10] * U_SCALE[:, None]
+        return X, Z[6:6 + NU] * U_SCALE[:, None]
 
     def params(self, track, i0):
         """The window's track parameters from node i0 of `track` (on this window's grid)."""
@@ -268,9 +298,12 @@ class Window:
 
     def solve(self, track, i0, x0, v_end, X_init, U_init):
         """The plan from node i0 starting at state x0, warm-started from X_init (6 x N) and
-        U_init (4 x M). Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s,
+        U_init (5 x M: rate, a, ax, ay, the rear's speed; 4 rows take the rear's speed from
+        the request). Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s,
         defect (the largest shooting gap)."""
         P, wl, wr, s = self.params(track, i0)
+        if U_init.shape[0] == 4:                 # a warm start without the rear's speed
+            U_init = np.vstack([U_init, rear_speed(self.car, X_init[0, :self.M], U_init[1])])
         lbx, ubx = self.bounds(wl, wr, x0, v_end)
         half = 0.5 * self.car.width
         Pw = np.vstack([P, wl[:self.M] - half - self.margin, wr[:self.M] - half - self.margin])
@@ -348,7 +381,7 @@ class Window:
 
 def shift(plan, k, tail_X, tail_U):
     """The warm start for the window k nodes on: the plan's nodes and controls from k, then
-    tail_X (6 x k) and tail_U (4 x k) for the stretch it did not cover."""
+    tail_X (6 x k) and tail_U (5 x k) for the stretch it did not cover."""
     X = np.hstack([plan["X"][:, k:], tail_X])
     U = np.hstack([plan["U"][:, k:], tail_U])
     return X, U[:, :X.shape[1] - 1]

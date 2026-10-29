@@ -97,7 +97,10 @@ def test_re_solving_along_haruna_is_feasible_and_live():
     """The live budget on a real road (the live planner's design, 4.4): stepping a second of
     plan at a time from s 60 through Haruna's hairpins, each re-solve warm from the last plan,
     under the live loop's 1.5 s budget, returns a feasible plan, 95 % of them within 1 s.
-    (Measured 2026-10-30: 56 of 56 feasible, p50 0.22 s, p95 0.54 s, p99 0.77 s.)"""
+    (Measured 2026-10-30: 57 of 59 feasible, p50 0.21 s, p95 0.72 s, p99 1.1 s, with the rear
+    tyres' own slip.) And the plan does not slide where the car cannot: on the gentle bend at
+    s 90-160 under full drive its sideslip is L0's (two-track, PhysX's tyre on all four),
+    within 2 deg (the ellipse on the rear planned 7 deg against L0's 1)."""
     c = Car.from_spec(SPEC)
     t = Track.from_swb_course(HARUNA, SurfaceTable.from_yaml(CLASSES), c).resampled(4.0)
     l0 = np.load(L0_HARUNA)
@@ -115,7 +118,7 @@ def test_re_solving_along_haruna_is_feasible_and_live():
     plan = cold.solve(t, i, x0, v_end(i), X, U)
     assert plan["ok"], plan["status"]
     w.lam = cold.lam
-    solves, ok = [], []
+    solves, ok, slide = [], [], []
     for _ in range(40):
         j = max(1, int(np.searchsorted(plan["t"], 1.0)))      # a second on along the plan
         i = plan["i0"] + j
@@ -126,8 +129,14 @@ def test_re_solving_along_haruna_is_feasible_and_live():
         solves.append(new["solve_s"])
         ok.append(new["ok"] and new["defect"] < 1e-2 and new["violation"] < 1e-2)
         if new["ok"]:
+            jj = max(1, int(np.searchsorted(new["t"], 1.0)))       # the part the car drives
+            for q in range(jj):
+                if 90.0 <= new["s"][q] <= 160.0:
+                    beta = math.atan2(new["X"][1, q], new["X"][0, q])
+                    slide.append(abs(beta - np.interp(new["s"][q], l0["s"], l0["beta"])))
             plan = new
     assert len(solves) >= 35
+    assert slide and math.degrees(max(slide)) < 2.0
     assert np.mean(ok) >= 0.95
     p95, p99 = np.percentile(solves, [95, 99])
     assert p95 <= 1.0 and p99 <= 1.5, (p95, p99)
