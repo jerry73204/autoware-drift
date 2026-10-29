@@ -97,3 +97,20 @@ def test_haruna_section_solves():
                                    "mu", "grade", "sliding")})
     sol = solve_min_time(t, c, v_start=15.0)
     check_feasible(t, sol, c)
+
+
+def test_the_plan_brakes_with_the_car_s_own_bias():
+    """drift_mustang's brakes are static (50:50): wherever the plan brakes, the front pair takes
+    half of it, alike, and the motor does not drive at the same time."""
+    r, a, b = 20.0, 120.0, 120.0 + 0.5 * math.pi * 20.0
+    t = road(lambda s: 1.0 / r if a <= s < b else 0.0, b + 60.0).resampled(2.0)
+    c = Car.from_spec(SPEC)
+    sol = solve_min_time(t, c, v_start=25.0)
+    check_feasible(t, sol, c)
+    T = sol["torque"]
+    braking = (T[:, 0] + T[:, 1]) < -200.0
+    assert braking.sum() > 5
+    front = T[braking, 0] + T[braking, 1]
+    assert np.allclose(front / T[braking].sum(axis=1), 0.5, atol=0.02)
+    assert np.allclose(T[braking, 0], T[braking, 1], atol=5.0)
+    assert sol["violation"]["both"][0] < 1e4

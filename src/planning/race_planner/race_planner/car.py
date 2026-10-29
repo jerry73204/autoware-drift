@@ -7,7 +7,10 @@ Only what the spec says goes in; nothing is per track. Derived quantities:
 - axle_torque_max: at the drive axle; `ev`: the motor's peak torque through its gear (to base
   speed, then power_max, the motor's peak power); `ideal`: max_drive_torque per driven wheel.
 - width: the body's, wheel_tread plus the side overhangs (sim_vehicle_spec's rule).
-- brake_torque_max: per wheel.
+- transfer_height: the load transfer's arm, the CoM's height over where the tyre forces act:
+  h_cg on a real car (the contact patch); `in_isaac()` for Isaac's.
+- brake_torque_max: per wheel; brake_distribution: the axles' split of a brake demand
+  (sim_vehicle_ecu: static, the static axle loads; dynamic_axle_load, shifted with deceleration).
 - drag: 1/2 rho Cd A (N per (m/s)^2); roll: the rolling coefficient.
 - The tyre: `mu` (the spec's friction, relative to the reference surface: a surface's mu is
   this times its class's over the reference's, see track.SurfaceTable), PhysX's stiffnesses
@@ -15,7 +18,7 @@ Only what the spec says goes in; nothing is per track. Derived quantities:
   longitudinal: long_stiff_value per g) and its friction-vs-slip curve. How these become a
   tyre model is model.py's business.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import yaml
 
@@ -44,6 +47,19 @@ class Car:
     roll: float
     diff: str
     drive_axle: str
+    brake_distribution: str = "dynamic_axle_load"   # sim_vehicle_ecu's default
+    transfer_height: float = None   # the tyre forces' arm about the CoM; None: h_cg (the ground)
+
+    def __post_init__(self):
+        if self.transfer_height is None:
+            self.transfer_height = self.h_cg
+
+    def in_isaac(self):
+        """The car as Isaac builds it today: aib applies the tyre forces at the wheel centre
+        (aib/isaac/vehicle.py, TireForceAppPoint), not the contact patch, so their arm about the
+        CoM is h_cg - r_wheel and the load transfer a third of a real car's (swb
+        docs/issues/023)."""
+        return replace(self, transfer_height=self.h_cg - self.r_wheel)
 
     @property
     def wheel_base(self):
@@ -74,4 +90,5 @@ class Car:
             brake_torque_max=float(d["brakes"]["max_brake_torque"]),
             drag=0.5 * r["air_density"] * r["drag_coefficient"] * r["frontal_area"],
             roll=float(r["rolling_coefficient"]),
-            diff=p.get("differential", {}).get("type", "open"), drive_axle=p["drive_axle"])
+            diff=p.get("differential", {}).get("type", "open"), drive_axle=p["drive_axle"],
+            brake_distribution=d["brakes"].get("distribution", "dynamic_axle_load"))

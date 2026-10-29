@@ -21,7 +21,7 @@ of drift_mustang on dry asphalt: Fx/Fz rms 0.012, Fy/Fz rms 0.041 over 3800 whee
 
 The body is planar, x forward, y left, yaw rate r; the wheels at (lf, +-track/2), (-lr, +-track/2);
 the front pair steered by Ackermann from the bicycle angle delta; the loads by the static split
-and the quasi-static transfer from the body's accelerations (longitudinal over the wheel base,
+and the quasi-static transfer from the body's accelerations over the car's transfer_height (longitudinal over the wheel base,
 lateral over the track, each axle its static share; the spec's suspension is the same on both
 axles and has no anti-roll bars).
 
@@ -98,7 +98,7 @@ def wheels(car):
 
 def loads(car, ax, ay):
     """Each wheel's load (N) under the body's accelerations ax, ay (m/s^2)."""
-    L, t, h, m = car.wheel_base, car.track, car.h_cg, car.m
+    L, t, h, m = car.wheel_base, car.track, car.transfer_height, car.m
     st = rest_loads(car)
     dlon = m * ax * h / L / 2.0                       # per wheel, from the front to the rear
     share_f, share_r = car.lr / L, car.lf / L

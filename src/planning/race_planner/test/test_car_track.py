@@ -70,3 +70,7 @@ def test_surface_sliding_share_comes_from_the_class():
     car = Car.from_spec(SPEC)
     if os.path.isdir(HARUNA):
         assert np.allclose(Track.from_swb_course(HARUNA, table, car).sliding, 0.8)
+
+
+def test_car_reads_its_brake_distribution():
+    assert Car.from_spec(SPEC).brake_distribution == "static"

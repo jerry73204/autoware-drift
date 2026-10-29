@@ -80,22 +80,31 @@ def test_past_the_peak_the_tyre_falls_to_the_sliding_share():
 
 
 def test_steady_cornering_matches_isaac_s_circle():
-    """Steering and sideslip on the 40 m ramp to 0.6 g. Above it the model's rear saturates
-    first (sideslip 0.6 deg past Isaac's at 0.68 g, 2.6 at 0.94; the steering still within 0.05
-    deg to 0.85 g): open, the lateral load transfer's split or the surface layer's lagged drop
-    are the suspects."""
-    car = Car.from_spec(SPEC)
+    """Steering and sideslip on the 40 m ramp to 0.94 g, with Isaac's load transfer (the tyre
+    forces at the wheel centre, swb issue 023) and asphalt's sliding share. With a real car's
+    transfer the model's rear saturates first, 2.6 deg more sideslip at 0.94 g."""
+    car = Car.from_spec(SPEC).in_isaac()
     for V, R, tyre_angle, beta in ISAAC["circle"]:
-        if V * V / R > 0.6 * 9.81:
-            continue
-        s = steady_state(car, MU, speed=V, radius=R)
+        s = steady_state(car, MU, speed=V, radius=R, sliding=0.8)
         assert s["ok"]
-        assert math.degrees(s["delta"] - tyre_angle) == pytest.approx(0.0, abs=0.05), V
-        assert math.degrees(s["beta"] - beta) == pytest.approx(0.0, abs=0.5), V
+        assert math.degrees(s["delta"] - tyre_angle) == pytest.approx(0.0, abs=0.1), V
+        assert math.degrees(s["beta"] - beta) == pytest.approx(0.0, abs=0.7), V
+
+
+def test_isaac_s_load_transfer_is_a_third_of_a_real_car_s():
+    """Measured on the sweeps (play_log/model_check/dry2): 70 N per m/s^2 per axle sideways
+    and 168 front to rear, against m ay h / t / 2 = 219 and 2 m ax h / L = 482."""
+    car = Car.from_spec(SPEC)
+    isaac = car.in_isaac()
+    lat = lambda c: (model.loads(c, 0.0, 1.0)[1] - model.loads(c, 0.0, 1.0)[0]) / 2  # noqa: E731
+    lon = lambda c: sum(model.loads(c, -1.0, 0.0)[:2]) - sum(model.loads(c, -1.0, 0.0)[2:])  # noqa: E731
+    assert float(lat(car)) == pytest.approx(219.4, rel=0.01)
+    assert float(lat(isaac)) == pytest.approx(70.1, rel=0.05)
+    assert float(lon(isaac)) == pytest.approx(168.1, rel=0.05)
 
 
 def test_steady_step_matches_isaac_s():
-    car = Car.from_spec(SPEC)
+    car = Car.from_spec(SPEC).in_isaac()
     V, delta, r, ay = ISAAC["step"]
     s = steady_state(car, MU, speed=V, delta=delta)
     assert s["ok"]
