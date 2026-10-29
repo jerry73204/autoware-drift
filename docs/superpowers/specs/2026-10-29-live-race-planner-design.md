@@ -25,29 +25,47 @@ one is a requirement below.
 
 ## 1a. System requirements (user, 2026-10-29)
 
-- **SR1, the speed envelope: 0 to 110 km/h (30.6 m/s)**, Taiwan's highway limit, anywhere.
-  It is a hard limit, a rule of the road, not a tuning knob: no layer plans or drives above it.
-- **SR2, the fastest lap within SR1**: on a mountain road the physics (grip, the bends) keeps
-  the car well below the cap most of the time; where it does not (straights), the cap binds.
-  The objective stays minimum time; the cap is a constraint of it, so where to brake, the
-  line and whether to slide are still the optimiser's.
+- **SR1, speed: at least 110 km/h (30.6 m/s), and as fast as the car and the road allow.**
+  110 km/h is Taiwan's highway limit and the floor of the envelope the system must handle; it
+  is not a cap. There is no speed limit in the plan: on Haruna's straights the optimum reaches
+  134 km/h (37.2 m/s), which is fine.
+- **SR2, the fastest lap**: minimum time is the objective; the car's power, grip and the bends
+  set the speed. On a mountain road that is mostly well under 100 km/h; on straights higher.
 
-What follows from them, and is used below:
+- **SR3, the car's own capability is respected** (user, 2026-10-29): its top speed, its
+  acceleration and its deceleration, and its steering, as the spec and the ECU make them. No
+  layer plans or commands what the car cannot do (R4 generalised). Each limit comes from the
+  spec (sim_vehicle_spec `vehicles/<car>.yaml`), never from a planner constant; where the spec
+  declares an explicit limit (a speed limiter, a request range of the vehicle interface), it
+  wins over the derived one.
 
-| quantity | value | from |
-|---|---|---|
-| top speed | 30.6 m/s | SR1 |
-| braking distance from top speed | 58 m at 8 m/s^2 (dry asphalt, the car's brakes); 160 m at 3 m/s^2 (packed snow) | v^2 / 2a |
-| look-ahead the corner decisions need | braking distance + the corner (50-100 m): **150-200 m on asphalt, 250-300 m on snow**, 5-10 s at the cap | 4.1 |
-| distance driven per L1 re-plan (1 s) | 31 m | SR1 |
-| distance driven per L2 tick (20 ms) | 0.6 m | SR1 |
-| distance driven in one 10 Hz NDT scan | 3 m | SR1; the race estimator must hold up to 31 m/s (swb issue 017: NDT lost the car at 30 m/s on Town05; held laps to 28 m/s) |
-| planning margin to the cap | L1 plans to 108 km/h (30.0 m/s), L2 may not exceed 110 | as the grip margin (4.4): the tracker's speed error must not break the rule |
+  | limit | from the spec (drift_mustang) | value | modelled today (race_planner) |
+  |---|---|---|---|
+  | top speed | motor_max_rpm 16000 through gear 6.0 on R 0.32 m; and power 330 kW against drag (0.5 rho Cd A = 0.51) and rolling | 89 m/s by the motor, about 86 m/s by power and drag: the lower one, about 310 km/h | power and drag yes; the motor's rpm limit **no** (add as `|w_rear| <= rpm_max / gear`) |
+  | acceleration | motor peak torque 700 N m x 6.0 to base speed, then 330 kW; rear grip | 13 kN at the axle (9 m/s^2), grip-limited lower (about 6 m/s^2 on dry asphalt) | yes (torque, power, tyre) |
+  | deceleration | max_brake_torque 2500 N m per wheel, static 50:50; regen 150 N m / 60 kW at the motor; grip | 31 kN of brake (21 m/s^2), grip-limited at about 11 m/s^2 | brakes yes; the regen limits **no** (add: regen within its torque and power, the rest friction) |
+  | steering | max_steer_angle 1.01 rad (58 deg); steering rate_limit, time_constant | rate_limit 0 = none in the spec | lock yes; the rate is a planner constant (2 rad/s) **instead of** the spec's: use the spec's when set, and the ECU actuator's real rate otherwise |
+  | jerk / request range | the vehicle interface (Autoware's gate: its acceleration and jerk limits, opened for racing) | race-stack-design.md sets them | **no**: L2 plans its inputs inside the gate's limits, or the gate clips them and the plan is wrong |
 
-Effect on today's plan: Haruna's whole-track optimum (s 60-1520) reaches 37.2 m/s and spends
-268 m (18 % of the track) above 110 km/h; capped, it is at least 0.7 s slower. So the cap
-binds on Haruna's straights, which makes Haruna a test of SR1 as well as of the corners. The
-success target (section 7) is relative to the capped L0 optimum, not to 74.8 s.
+  Where each is enforced: L0 and L1 as constraints of the OCP (a plan never asks for more); L2
+  as hard input constraints of the NMPC and a clamp in the LQR fallback (a command never asks
+  for more); the ECU and the gate keep their own limits as the last guard, not as the place
+  the limit is first met. A test per limit checks the plan against it (section 7).
+
+What follows from them: every rate, horizon and budget is sized for the fastest the car will
+go on the track, `v_top`, which is at least 110 km/h by SR1 and in practice what L0 (or
+`qss.py`) computes for the track (37.2 m/s on Haruna; drift_mustang's spec allows far more on a
+long straight: 330 kW, a 16000 rpm motor through 6:1). So `v_top` comes from the car and the
+track's geometry, never from a setting.
+
+| quantity | at 110 km/h (SR1 floor) | at Haruna's 134 km/h | sized by |
+|---|---|---|---|
+| braking distance from v_top at 8 m/s^2 (dry asphalt) | 58 m | 86 m | v^2 / 2a |
+| on packed snow (3 m/s^2) | 160 m | 230 m | the same, mu from the surface |
+| look-ahead the corner decisions need (braking + the corner, 50-100 m) | 150-200 m | 150-250 m (asphalt), 300+ m (snow) | 4.1 |
+| distance driven per L1 re-plan (1 s) | 31 m | 37 m | v_top |
+| distance driven per L2 tick (20 ms) | 0.6 m | 0.7 m | v_top |
+| distance driven per 10 Hz NDT scan | 3.1 m | 3.7 m | the race estimator must hold up to v_top (swb issue 017: NDT lost the car at 30 m/s on Town05, laps held to 28 m/s): a risk for the estimator, outside this design |
 
 ## 2. What the field does, and what we take from it
 
@@ -100,9 +118,10 @@ assumes another succeeded.
 Two needs pull in opposite directions.
 
 - **Seeing far enough.** A corner's decisions (where to brake, the line, whether to slide) depend
-  on the whole corner and what follows: braking from the 110 km/h cap at 8 m/s^2 takes 58 m
-  (160 m on snow), and a hairpin's entry, apex and exit span another 50-100 m. The car must
-  look **150-300 m (5-10 s)** ahead to decide the next corner well (1a).
+  on the whole corner and what follows: braking from Haruna's 134 km/h at 8 m/s^2 takes 86 m
+  (from 110 km/h, 58 m; on snow several times more), and a hairpin's entry, apex and exit span
+  another 50-100 m. The car must look **150-300 m (5-10 s)** ahead to decide the next corner
+  well (1a).
 - **Reacting fast enough.** A car sliding on saturated rear tyres is unstable: its sideslip
   diverges in a few tenths of a second (before the s 935 spin the sideslip doubled, 6.5 to
   13.5 deg, in 0.6 s under braking, and the car spun within 0.2 s of the last frame it held). Feedback
@@ -120,7 +139,7 @@ racing stacks (TUM; Liniger's hierarchical variant; Sensors 2024) and how driver
 ahead while correcting every instant.
 
 Why not one fast layer with a long horizon (Liniger's single MPCC)? It works for 1:43 cars at
-3 m/s, where 40 steps cover the next corner. At 30.6 m/s, 300 m is 10 s: 500 steps at 20 ms, two
+3 m/s, where 40 steps cover the next corner. At 37 m/s, 300 m is 8 s: 400 steps at 20 ms, two
 orders of magnitude more than one RTI tick can carry on a two-track model with sliding tyres.
 We keep its idea (contouring cost, re-solve from the measured state) in the tracker.
 
@@ -175,17 +194,14 @@ and slide) from where the car actually is, again every second and immediately af
 leaves the plan. It is the layer that would have re-planned the s 935 approach at the car's
 real speed and braked from there.
 
-**Why ~1 Hz and 150-300 m.** At the 110 km/h cap the car covers 31 m between plans, a sixth
-of a 200 m window, so each plan is used for its first part and replaced while the corner is
+**Why ~1 Hz and 150-300 m.** At Haruna's top speed (37 m/s) the car covers 37 m between
+plans, a sixth of a 200 m window, so each plan is used for its first part and replaced while the corner is
 still ahead; one second leaves room for a solve that converges. "Live" is defined as: the plan
 arrives while the car is still in its window's first quarter (solve time x speed < W / 4);
-with W 200 m at 30.6 m/s that is 1.6 s, and up to 3 s is acceptable with W grown to keep the
-ratio. W is set by the surface's braking distance from the cap (1a), so it is longer on snow,
-from the car's spec and the surface's mu, never per track.
-
-**SR1 in L1.** The speed constraint is `|v| <= 30.0 m/s` (108 km/h) at every node, in L0 as
-well; on a straight the plan meets it and holds it, so the braking point for the next bend is
-computed from 108 km/h, not from a speed the car will never reach.
+with W 200 m at 37 m/s that is 1.35 s, and up to 3 s is acceptable with W grown to keep the
+ratio. W is the braking distance from `v_top` on the surface plus a corner (1a), so it is
+longer on snow and on fast tracks; it comes from the car's spec, the surface's mu and L0's
+`v_top`, never per track.
 
 **What it solves.** Today's spatial OCP (two-track, PhysX tyre, load transfer, locked axle,
 slip bounds) over `[s0, s0 + W]` from the predicted state, ending under the bound of 4.3, in the
@@ -243,11 +259,6 @@ bounds and input limits are constraints, and the progress along the track is par
 constraints; it is the fallback, valid near the plan (Peterson), cheap enough never to miss a
 tick.
 
-**SR1 in L2.** `|v| <= 30.6 m/s` is a hard constraint of the NMPC (input-side: the
-acceleration request is limited so the predicted speed stays under it); the 0.6 m/s between it
-and L1's 108 km/h absorbs the tracker's speed error, so following the plan never breaks the
-rule. The LQR fallback carries the same limit as a clamp on its acceleration request.
-
 **Why acados with real-time iteration.** One SQP iteration per tick on a warm start is what
 50 Hz allows, and what the literature runs in a few ms; acados generates C from the same CasADi
 model code L1 uses, and the C is what the later C++ node links.
@@ -287,17 +298,21 @@ taken to Isaac. Isaac remains the judge.
 
 1. **L1 speed spike** (throwaway): a warm-started 200 m window of today's OCP stepped along
    Haruna; solve times, with one and with three warm starts. Decides W, the grid and the model.
-2. **Model-in-the-loop**: L1 re-planning against `sim.py` with today's tracker; then L2 (acados)
+2. **SR3 in the model**: the motor's rpm limit, regen within its torque and power, the
+   steering rate from the spec (or the ECU's actuator), each with a test that a plan on a long
+   straight, a full stop and a quick direction change stays within it; L0 re-solved.
+3. **Model-in-the-loop**: L1 re-planning against `sim.py` with today's tracker; then L2 (acados)
    in its place; with the wrong-plant variant.
-3. **Isaac, Haruna full run** with L0, L1, L2. Failure: any guardrail contact, or any wheel off
+4. **Isaac, Haruna full run** with L0, L1, L2. Failure: any guardrail contact, or any wheel off
    the asphalt for more than 0.2 s (course_probe logs both).
-4. **Disturbances** (course_probe gains an injection hook): a yaw-rate kick of 30 deg/s over
+5. **Disturbances** (course_probe gains an injection hook): a yaw-rate kick of 30 deg/s over
    0.1 s before a hairpin; a 20 m patch at mu 0.6 at a hairpin's entry. The run completes.
-5. **Tsukuba**, same code and settings.
+6. **Tsukuba**, same code and settings.
 
-Success: milestone 3 within 5 % of the capped L0 optimum (L0 re-solved with SR1; 74.8 s was
-uncapped), never above 110 km/h, L1 within budget (p99) and L2 within 10 ms over the run;
-milestones 4 and 5 complete. The same run without L0 is reported alongside.
+Success: milestone 4 within 5 % of L0's optimum (74.8 s), L1 within budget (p99) and L2
+within 10 ms over the whole speed range the run covers (to 134 km/h on Haruna, so SR1's
+110 km/h is exercised);
+milestones 5 and 6 complete. The same run without L0 is reported alongside.
 
 ## 8. Left to the builder
 
@@ -317,4 +332,5 @@ proving ground or the first track, and never per corner.
 | the spatial planner stands down in a spin | its formulation divides by progress along the track |
 | model-in-the-loop simulator before Isaac | five minutes per Isaac run is too slow to develop a live system in |
 | why not one long-horizon MPCC, why not a sampled planner | alternatives argued, not just dropped |
-| SR1 / SR2 (1a): a hard 110 km/h cap, fastest lap within it; horizon, budgets and margins derived from it; success measured against the capped optimum | user's system requirement; Haruna's optimum exceeded it on 18 % of the track |
+| SR1 / SR2 (1a): at least 110 km/h, no cap, the fastest lap; horizons and budgets sized from v_top (L0's top speed for the track, 134 km/h on Haruna) | user's system requirements |
+| SR3 (1a): the car's top speed, acceleration, deceleration and steering limits from its spec, in every layer; three gaps in today's planner named (motor rpm, regen, steering rate from the spec) and the gate's limits | user's system requirement |
