@@ -100,3 +100,13 @@ def test_the_live_loop_drives_through_the_finish():
     d = Driver(c, tr, Tracker(c, tr))
     out = run(d, plant, s_end=420.0, t_max=30.0)          # 20 m past the finish
     assert out["result"] == "done", out
+
+
+def test_on_a_circuit_the_car_is_found_on_the_first_lap():
+    t = road(lambda s: 0.01, 2 * math.pi * 100 - 1.0, ds=1.0, w=6.0)
+    t = __import__("dataclasses").replace(t, closed=True)
+    u = t.unrolled(3).resampled(4.0)
+    lap = t.length + 1.0
+    f = Frenet(u, int(lap / 4.0))
+    s, n, _ = f(float(t.x[50]), float(t.y[50]), float(t.psi[50]))
+    assert s == pytest.approx(50.0, abs=2.0)

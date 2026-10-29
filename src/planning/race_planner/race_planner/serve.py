@@ -34,15 +34,17 @@ def _out(obj):
 class Frenet:
     """The car's place on the track: s, n (left > 0) and xi (heading off the line's)."""
 
-    def __init__(self, track):
-        self.t, self.i = track, 0
+    def __init__(self, track, first=None):
+        # first: how many nodes the first search looks in (a circuit's first lap: its laps
+        # overlap, and the nearest node of all may be two laps on)
+        self.t, self.i, self.first = track, 0, first or len(track.s)
 
     def __call__(self, x, y, yaw):
         tr = self.t
         lo, hi = max(0, self.i - 30), min(len(tr.s), self.i + 60)
         d = np.hypot(tr.x[lo:hi] - x, tr.y[lo:hi] - y)
         if self.i == 0:
-            d = np.hypot(tr.x - x, tr.y - y)
+            d = np.hypot(tr.x[:self.first] - x, tr.y[:self.first] - y)
             lo = 0
         self.i = i = lo + int(np.argmin(d))
         ps = float(tr.psi[i])
@@ -60,6 +62,7 @@ def main():
     car = Car.from_spec(init["spec"])
     track = Track.from_swb_course(init["map_dir"], SurfaceTable.from_yaml(init["classes"]), car)
     l0 = dict(np.load(init["l0"])) if init.get("l0") else None
+    lap = None
     if track.closed:                  # a circuit: driven as `laps` laps of open road
         laps = int(init.get("laps", 3))
         lap = track.length + float(track.s[1] - track.s[0])
@@ -71,7 +74,7 @@ def main():
     driver = live.Driver(car, track, Tracker(car, track), l0=l0,
                          ds=float(init.get("ds", 4.0)), length=float(init.get("length", 200.0)),
                          grip=float(init.get("grip", 0.92)), budget=float(init.get("budget", 1.0)))
-    frenet = Frenet(track)
+    frenet = Frenet(track, None if lap is None else int(lap / float(track.s[1] - track.s[0])))
     _out({"ready": True, "s0": float(track.s[0])})
     started = False
     for line in sys.stdin:
