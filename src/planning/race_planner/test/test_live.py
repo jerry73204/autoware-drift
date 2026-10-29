@@ -110,3 +110,20 @@ def test_on_a_circuit_the_car_is_found_on_the_first_lap():
     f = Frenet(u, int(lap / 4.0))
     s, n, _ = f(float(t.x[50]), float(t.y[50]), float(t.psi[50]))
     assert s == pytest.approx(50.0, abs=2.0)
+
+
+def test_a_car_slower_than_its_plan_is_never_behind_the_plan_it_drives():
+    """A plant with less grip than the planner's map (x0.9): the car runs slower than its plans.
+    The window starts where the car will be, its speed's deviation counted, and a plan is
+    adopted only once the car has reached its first node: the car is never behind the plan it
+    drives by more than a node (plan_at would clamp it there, frozen)."""
+    c = Car.from_spec(SPEC)
+    k = lambda s: 0.0 if s < 150 else (1 / 60.0 if s < 250 else 0.0)
+    tr = road(k, 700.0, ds=4.0, w=5.0)
+    plant = Plant(c, SPEC, road(k, 700.0, ds=1.0, w=5.0), mu_scale=0.9)
+    plant.reset(s=20.0, speed=10.0)
+    d = Driver(c, tr, Tracker(c, tr))
+    out = run(d, plant, s_end=350.0, t_max=40.0)
+    assert out["result"] == "done", out
+    assert min(r["behind"] for r in d.log) >= -d.ds
+    assert getattr(d, "behind", 0) == 0

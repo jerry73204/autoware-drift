@@ -189,6 +189,13 @@ class Driver:
         ss, tt = self.plan["s"], self.plan["t"]
         s_ahead = float(np.interp(t_now + lead_t, tt, ss)) if t_now + lead_t < tt[-1] else \
             state["s"] + lead_t * max(state["vx"], 0.0)
+        # and the car off the plan's schedule: its speed's deviation decays like the states', the
+        # distance it makes on the way. Without it a car slower than its plan got windows that
+        # started ahead of where it would be; plan_at then clamped it to the new plan's first
+        # node, the next prediction started from that clamped time and it compounded (Isaac,
+        # Tsukuba lap 2: n_plan, v_plan frozen for whole seconds, then a spin at H1)
+        dv = math.hypot(state["vx"], state["vy"]) - math.hypot(X[0], X[1])
+        s_ahead += dv * TRACK_TAU * (1.0 - math.exp(-lead_t / TRACK_TAU))
         Xa, _, _ = plan_at(self.plan, s_ahead)
         x = Xa + (self.x_of(state) - X) * math.exp(-lead_t / TRACK_TAU)
         x[0] = max(x[0], 1.0)
@@ -227,9 +234,15 @@ class Driver:
 
     def step(self, state):
         t = state["t"]
-        if self.pending is not None and t >= self.pending[0]:
+        if (self.pending is not None and t >= self.pending[0]
+                and (state["s"] >= self.pending[1]["s"][0] - self.ds
+                     or state["s"] > self.plan["s"][-1] - END_MARGIN)):
+            # adopted once the car has reached its first node (a plan the car is behind has no
+            # reference for it: plan_at clamps), or when the current plan runs out
             self.plan, self.plan_t0, self.plan_mu = self.pending[1], self.pending[0], self.pending[2]
             self.pending = None
+        if state["s"] < self.plan["s"][0] - self.ds:
+            self.behind = getattr(self, "behind", 0) + 1     # should not happen: counted
         reason = None
         if self.mu_scale(state) < min(self.plan_mu, self.pending_mu()) - ENVELOPE_MU:
             # the road is slipperier than any plan made or in the making knows: a new one at once,
@@ -267,7 +280,8 @@ class Driver:
                          "mu_ratio": round(float(state.get("mu_ratio", 1.0)), 3),
                          "mu_scale": round(self.mu_scale(state), 3),
                          "demand_g": round(getattr(self, "demand", 0.0), 3),
-                         "stopping": self.stopping})
+                         "stopping": self.stopping,
+                         "behind": round(float(state["s"] - self.plan["s"][0]), 2)})
         return cmd
 
     def stop(self, state, beta):
