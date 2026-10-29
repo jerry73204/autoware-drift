@@ -87,7 +87,11 @@ def test_three_failed_solves_in_a_row_stop_the_car():
             break
         st = plant.step(cmd["accel"], cmd["tire_angle"], dt=0.02)
     assert out == "solves failed"
-    assert st["t"] < 11.0              # 3 timer solves (~4 s), then braking from ~32 m/s at 6 m/s^2
+    # the car follows its last plan while the plan still holds its stop, then stops before
+    # the plan's end, on the road and on the line it had
+    first = next(r for r in d.log if r["stopping"])
+    assert first["s"] > 150.0                                # not at the third failure (~s 90)
+    assert st["s"] < d.plan["s"][-1]
     assert abs(st["n"]) < 5.0 - 0.5 * c.width                # stopped on the road
     assert abs(st["n"] - d.log[-1]["n_plan"]) < 0.3          # on the line it had
 

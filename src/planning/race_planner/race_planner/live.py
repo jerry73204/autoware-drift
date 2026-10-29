@@ -34,6 +34,7 @@ REPLAN_PERIOD = 1.0
 # sideslip (a spin), or within this distance of the plan's end with no newer plan
 FAILS_TO_STOP, SPIN_BETA, END_MARGIN = 3, math.radians(60.0), 10.0
 STOP_DECEL = -6.0
+CORNER = 100.0                 # m: the corner a window must hold beyond its braking (design 4.1)
 BLEND = 10                         # nodes over which the warm start eases to the shifted plan
 TRACK_TAU = 0.5                    # s: how fast L2 takes a deviation from the plan out
 
@@ -93,6 +94,25 @@ class Driver:
     log: list = field(default_factory=list)
 
     def __post_init__(self):
+        if self.l0 is None:
+            line, _ = min_curvature_line(self.track, 0.5 * self.car.width, 0.3)
+            self.ceiling = (self.track.s, speed_profile(line, self.car))
+        else:
+            self.ceiling = (np.asarray(self.l0["s"]), np.asarray(self.l0["speed"]))
+        # the window: at least `length`, and the braking distance from the track's top speed
+        # (the long view's) on its grippiest surface plus a corner (the design's 4.1, 4.4). A
+        # window shorter than that ends before the corner its plan brakes for: at Tsukuba's
+        # 55 m/s a 200 m window from s 1612 ran on to 55 m/s and ended in the corner's entry on
+        # its inside edge, and every window after it started too fast for the corner (off-road
+        # plans, three solves at the wall in a row; 260 m brakes from s 1630, as L0 does)
+        # (capped by the car's own top speed: a profile's free start on a straight is unbounded)
+        v_car = (self.car.power_max / self.car.drag) ** (1 / 3)
+        if self.car.wheel_speed_max:
+            v_car = min(v_car, self.car.wheel_speed_max)
+        v_top = min(float(np.max(self.ceiling[1])), v_car)
+        decel = self.grip * float(np.max(self.track.mu)) * G
+        need = v_top ** 2 / (2 * decel) + CORNER
+        self.length = max(self.length, self.ds * math.ceil(need / self.ds))
         if not self.track.closed:     # the window reaches past the finish: a straight run-off,
             # two windows long (a warm start's cold tail starts up to 0.8 of a window on and
             # runs a whole one: one window crashed Isaac's run at the finish)
@@ -100,11 +120,6 @@ class Driver:
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False)
         self.warm = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
                            budget=self.budget)
-        if self.l0 is None:
-            line, _ = min_curvature_line(self.track, 0.5 * self.car.width, 0.3)
-            self.ceiling = (self.track.s, speed_profile(line, self.car))
-        else:
-            self.ceiling = (np.asarray(self.l0["s"]), np.asarray(self.l0["speed"]))
         self.plan = self.pending = None
         self.next_replan = 0.0
         self.busy_until = 0.0          # L1's core is busy with a solve until then
@@ -159,6 +174,16 @@ class Driver:
         if abs(beta) - abs(math.atan2(X[1], max(X[0], 0.5))) < MU_BETA:
             return 1.0
         return friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip)
+
+    def plan_left(self, state):
+        """How far the current plan reaches ahead of the car, m."""
+        return float(self.plan["s"][-1] - state["s"])
+
+    def plan_stop(self):
+        """The distance a stop from the plan's end speed takes at STOP_DECEL, and END_MARGIN: the
+        plan has to reach at least this far ahead for the car to keep following it."""
+        v = math.hypot(self.plan["X"][0, -1], self.plan["X"][1, -1])
+        return v * v / (2 * abs(STOP_DECEL)) + END_MARGIN
 
     def pending_mu(self):
         return self.pending[2] if self.pending is not None else 1.0
@@ -258,7 +283,10 @@ class Driver:
             self.next_replan = t + REPLAN_PERIOD
         beta = math.atan2(state["vy"], max(abs(state["vx"]), 0.5))
         if self.stopping is None:
-            if self.fails >= FAILS_TO_STOP:
+            if self.fails >= FAILS_TO_STOP and self.plan_left(state) < self.plan_stop():
+                # failed solves leave the car its last plan, which is safe to follow while it
+                # still holds the car's stop beyond the car (a stop from 196 km/h into a corner
+                # is the danger, not the plan): stopping only as it runs out
                 self.stopping = "solves failed"
             elif abs(beta) > SPIN_BETA:
                 self.stopping = "spin"
