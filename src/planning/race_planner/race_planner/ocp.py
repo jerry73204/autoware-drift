@@ -35,6 +35,8 @@ from race_planner.line import min_curvature_line
 from race_planner.qss import speed_profile
 
 G = 9.81
+# The steering rate when the spec sets none (drift_mustang's actuator is instantaneous): a fast
+# rack, a drift car's. A plan with no bound at all chatters its steering where time does not care.
 STEER_RATE = 2.0             # rad/s at the bicycle angle
 REG_STEER, REG_WHEEL = 1e-2, 1e-4
 X_SCALE = np.array([20.0, 2.0, 1.0, 3.0, 0.3, 0.3])
@@ -80,7 +82,11 @@ def _node_functions(car):
     share = ca.fmin(ca.fmax(share, 0.05), 0.95)
     brake = -(T[0] + T[1]) / share
     drive = T[2] + T[3] + (1 - share) * brake
-    brake_max = 2 * car.brake_torque_max / ca.fmax(share, 1 - share)
+    # the front pair brakes on friction alone; the rear on friction plus what the motor
+    # regenerates (within its torque and power), so the demand is held by whichever axle runs out
+    regen = ca.fmin(car.regen_torque_max, car.regen_power_max / ca.fmax(omega, 1.0))
+    brake_max = ca.fmin(2 * car.brake_torque_max / share,
+                        (2 * car.brake_torque_max + regen) / (1 - share))
     g = ca.vertcat(o["acc"][0] - u[5], o["acc"][1] - u[6], o["diff"], T[0] - T[1],  # = 0
                    brake, brake - brake_max,                                # >= 0, <= 0
                    drive, drive * omega, drive * brake,                     # motor, power, one
@@ -161,7 +167,10 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
         opti.subject_to(opti.bounded(-(track.w_right[k] - half - margin), X[3, k],
                                      track.w_left[k] - half - margin))
     opti.subject_to(opti.bounded(-car.steer_max, ca.vec(X[5, :]), car.steer_max))
-    opti.subject_to(opti.bounded(-STEER_RATE, ca.vec(U[0, :]), STEER_RATE))
+    rate = car.steer_rate_max or STEER_RATE
+    opti.subject_to(opti.bounded(-rate, ca.vec(U[0, :]), rate))
+    if car.wheel_speed_max is not None:   # the motor's rpm through its gear, at the driven rims
+        opti.subject_to(ca.vec(U[3:5, :]) <= car.wheel_speed_max)
     opti.subject_to(opti.bounded(-math.pi / 2, ca.vec(X[4, :]), math.pi / 2))
     if not closed:
         opti.subject_to(X[3, 0] == 0)
@@ -189,7 +198,8 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     """The minimum-time trajectory along `track` for `car`. Open tracks start at v_start (m/s,
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
-    the controls), ok, status, time and violation (the worst of each constraint and where).
+    the controls), ok, status, time and violation (the worst of each constraint and where), and
+    the solver's own X (6 x N) and U (7 x M), to warm-start another solve from.
     grip: the share of the road's friction the plan may use (1: all of it); below 1 it leaves a
     tracker room for what the model gets wrong at the limit.
 
@@ -237,4 +247,5 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
             "n": n, "xi": xi, "vx": vx, "vy": vy, "r": r, "delta": delta,
             "beta": np.arctan2(vy, vx), "sdot": sdot,
             "x": track.x + n * nx, "y": track.y + n * ny,
-            "w": Uv[1:5].T, "torque": torque, "fz": fz, "kappa": kap, "alpha": alp}
+            "w": Uv[1:5].T, "torque": torque, "fz": fz, "kappa": kap, "alpha": alp,
+            "X": Xv, "U": Uv}
