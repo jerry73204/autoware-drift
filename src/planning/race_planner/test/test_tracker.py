@@ -135,16 +135,39 @@ def test_the_nmpc_brings_a_disturbed_car_back(case, car, request):
 
 
 def test_the_lqr_alone_tracks_the_s_bend(car, s_case):
-    """The fallback on its own, every tick: looser, but on the road and near the line. (It is a
-    one-tick fallback near the plan; alone through the 20 m bend's deep drift it spins: its
-    linear model has no grip limit.)"""
+    """The fallback on its own, every tick: looser, near the line and through the plan, but no
+    longer on the road: since L1 plans with PhysX's tyres on every wheel (window.py) the S-bend's
+    plan drifts at the edge of the road, and the LQR, whose model keeps the ellipse and has no
+    grip limit, overshoots it by up to 0.7 m (alone through the 20 m bend's deep drift it spun
+    before too). It is a one-tick fallback near the plan: see the next test."""
     track, plan = s_case
     rec = drive(LqrTracker(car, track), track, plan, car)
-    check_on_road(rec, plan, car)
+    assert rec["s_end"] > plan["s"][-1] - 10.0
     check_limits(rec, car)
     assert rms(rec["lat"]) < 1.0
     assert rms(rec["speed"]) < 2.5
     assert np.percentile(rec["solve"], 99) <= P99_LIMIT
+
+
+class _Missing(Tracker):
+    """The NMPC missing its budget every other tick: the LQR's then."""
+
+    def step(self, *a):
+        self.ticks = getattr(self, "ticks", 0) + 1
+        self.budget = 0.0 if self.ticks % 2 == 0 else BUDGET
+        return super().step(*a)
+
+
+@pytest.mark.parametrize("case", ["bend_case", "s_case"])
+def test_the_lqr_as_a_fallback_keeps_the_car_on_the_road(case, car, request):
+    """The LQR as it is used: for the ticks the NMPC misses, here every other one."""
+    track, plan = request.getfixturevalue(case)
+    rec = drive(_Missing(car, track), track, plan, car)
+    assert 0.4 < rec["fallback"].mean() < 0.6
+    check_on_road(rec, plan, car)
+    check_limits(rec, car)
+    assert rms(rec["lat"]) < 0.6
+    assert rms(rec["speed"]) < 1.5
 
 
 def test_an_overrun_tick_falls_back_to_the_lqr(car, s_case):

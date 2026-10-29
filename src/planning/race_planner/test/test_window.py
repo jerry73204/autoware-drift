@@ -97,8 +97,8 @@ def test_re_solving_along_haruna_is_feasible_and_live():
     """The live budget on a real road (the live planner's design, 4.4): stepping a second of
     plan at a time from s 60 through Haruna's hairpins, each re-solve warm from the last plan,
     under the live loop's 1.5 s budget, returns a feasible plan, 95 % of them within 1 s.
-    (Measured 2026-10-30: 57 of 59 feasible, p50 0.21 s, p95 0.72 s, p99 1.1 s, with the rear
-    tyres' own slip.) And the plan does not slide where the car cannot: on the gentle bend at
+    (Measured 2026-10-30: 58 of 59 feasible, p50 0.27 s, p95 0.91 s, p99 1.04 s, with every
+    tyre's own slip.) And the plan does not slide where the car cannot: on the gentle bend at
     s 90-160 under full drive its sideslip is L0's (two-track, PhysX's tyre on all four),
     within 2 deg (the ellipse on the rear planned 7 deg against L0's 1)."""
     c = Car.from_spec(SPEC)

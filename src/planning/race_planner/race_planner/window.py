@@ -43,32 +43,34 @@ G = 9.81
 REG_STEER, REG_ACCEL = 1e-2, 1e-4
 END_SLIP, END_HEADING = 0.15, 0.35      # the window's last node: vy / vx, xi (rad)
 DROP = 0.2                              # the share of a plan's end not reused as a warm start
-NU = 5                                  # a stage's controls: rate a ax ay, the rear's speed
-NZ = 12                                 # a stage's variables: x (6), u (5), edge slack (1)
-KAPPA_MAX = 1.0                         # the rear tyres' slip ratio, either way
+NU = 7                                  # a stage's controls: rate a ax ay, the wheels' speeds
+NZ = 14                                 # a stage's variables: x (6), u (7), edge slack (1)
+KAPPA_MAX = 1.0                         # a tyre's slip ratio, either way
+FRONT_KAPPA_UP = 0.05                   # a front (braking only) wheel's, at most
 EDGE_PENALTY = 10.0                     # s per metre past the road's edge (less the margin)
 CACHE = os.environ.get("RACE_PLANNER_CACHE", os.path.expanduser("~/.cache/race_planner"))
 BLEND = 10                              # nodes over which a warm start's tail joins the plan
 X_SCALE = np.array([20.0, 2.0, 1.0, 3.0, 0.3, 0.3])
-U_SCALE = np.array([1.0, 10.0, 10.0, 10.0, 20.0])
+U_SCALE = np.array([1.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0])
 TRACK_FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")
 ROWS = ("ax", "ay", "fz_fl", "fz_fr", "fz_rl", "fz_rr", "use_fl", "use_fr", "use_rl", "use_rr",
         "drive", "power", "brake_front", "brake_rear", "sdot", "rear_balance", "kappa_rl",
-        "kappa_rr")
+        "kappa_rr", "front_balance_l", "front_balance_r", "kappa_fl", "kappa_fr")
 
 
 NLP_FUNCTIONS = ("nlp", "nlp_f", "nlp_g", "nlp_grad_f", "nlp_jac_g", "nlp_grad", "nlp_hess_l")
 
 
-def _compiled_nlpsol(nlp, opts, hess=None):
-    """IPOPT on nlp with its functions C-compiled (the Lagrangian's Hessian `hess` where given,
-    CasADi's own otherwise): generated once, compiled once per distinct code (cached by its
-    hash under CACHE), loaded; None without a compiler."""
+def _compiled_nlpsol(nlp, opts, own=None):
+    """IPOPT on nlp with its functions C-compiled (those in `own`, by their names, where given,
+    CasADi's own otherwise): generated once, compiled once per distinct code (cached by its hash
+    under CACHE), loaded; None without a compiler."""
+    own = own or {}
     probe = ca.nlpsol("l1", "ipopt", nlp, opts)
     d = tempfile.mkdtemp(prefix="race_planner_")
     cg = ca.CodeGenerator("l1_nlp.c", {"with_header": False})
     for name in NLP_FUNCTIONS:
-        cg.add(hess if name == "nlp_hess_l" and hess is not None
+        cg.add(own[name] if name in own
                else probe.get_function(name) if name != "nlp" else probe.oracle())
     cg.generate(d + os.sep)
     src = os.path.join(d, "l1_nlp.c")
@@ -94,19 +96,21 @@ def _load(src, key, opts):
     return ca.nlpsol("l1", "ipopt", lib, opts)
 
 
-def node_functions(car, rear_tyre=False):
+def node_functions(car, tyres=False):
     """f(x, u, p) -> (dx/ds, dt/ds); g(x, u, p) -> path constraints within (lbg, ubg).
 
-    u = (delta's rate, a, ax, ay), and with rear_tyre the rear axle's peripheral speed w too:
-    the rear tyres are then PhysX's own on their slip (axle.py), with three more rows: the two
-    tyres make the ECU's rear force (in the car's weight), and each one's slip ratio within
-    KAPPA_MAX (past it PhysX's tyre is far into its slide; a plan has no business there)."""
-    nu = 5 if rear_tyre else 4
+    u = (delta's rate, a, ax, ay), and with `tyres` the wheels' peripheral speeds too (the rear
+    axle's, the front left's, the front right's): every tyre is then PhysX's own on its slip
+    (axle.py), with six more rows: the two rear tyres make the ECU's rear force and each front
+    tyre its brake share (in the car's weight), and each wheel's slip ratio within KAPPA_MAX
+    (past it PhysX's tyre is far into its slide; a plan has no business there; a front wheel,
+    which only brakes, not above FRONT_KAPPA_UP)."""
+    nu = NU if tyres else 4
     x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", nu), ca.SX.sym("p", 4)   # kappa mu grade sliding
     vx, vy, r, n, xi, delta = (x[i] for i in range(6))
     kappa, mu, grade = p[0], p[1], p[2]
     o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [u[2], u[3]], p[3],
-                      w_rear=u[4] if rear_tyre else None)
+                      w_rear=u[4] if tyres else None, w_front=(u[5], u[6]) if tyres else None)
     sin_t = grade / ca.sqrt(1 + grade * grade)
     dvx = o["dx"][0] - G * sin_t * ca.cos(xi)
     dvy = o["dx"][1] + G * sin_t * ca.sin(xi)
@@ -130,10 +134,11 @@ def node_functions(car, rear_tyre=False):
                    sdot)
     lbg = [0, 0, 0, 0, 0, 0, -1, -1, -1, -1, 0, -ca.inf, 0, -ca.inf, 0.5]
     ubg = [0, 0, ca.inf, ca.inf, ca.inf, ca.inf, 1, 1, 1, 1, 1, 1, 1, 2, ca.inf]
-    if rear_tyre:
-        g = ca.vertcat(g, o["rear_balance"] / mg, *o["kappa"])
-        lbg += [0, -KAPPA_MAX, -KAPPA_MAX]
-        ubg += [0, KAPPA_MAX, KAPPA_MAX]
+    if tyres:
+        g = ca.vertcat(g, o["rear_balance"] / mg, *o["kappa"],
+                       *[b / mg for b in o["front_balance"]], *o["kappa_front"])
+        lbg += [0, -KAPPA_MAX, -KAPPA_MAX, 0, 0, -KAPPA_MAX, -KAPPA_MAX]
+        ubg += [0, KAPPA_MAX, KAPPA_MAX, 0, 0, FRONT_KAPPA_UP, FRONT_KAPPA_UP]
     out = ca.Function("out", [x, u, p], [ca.vertcat(*o["fx"]), ca.vertcat(*o["fy"]),
                                          ca.vertcat(*o["fz"]), ca.vertcat(*o["use"]),
                                          ca.vertcat(*o["alpha"])])
@@ -159,18 +164,39 @@ def controls_for(X, s, car):
     dvds = np.gradient(vx) / ds
     a = dvds * vx
     return np.vstack([np.gradient(delta) / ds * vx, a, a, vx * r,
-                      rear_speed(car, vx, a)])[:, :-1]
+                      wheel_speeds(car, X, a)])[:, :-1]
 
 
-def rear_speed(car, vx, a):
-    """The rear axle's peripheral speed that makes the rear force the request a asks of the ECU
-    at speed vx, in a straight line (the slip at the tyres' stiffness, within KAPPA_MAX / 2)."""
-    vx = np.asarray(vx, float)
+def wheel_lx(car, X):
+    """Each wheel's ground speed along its own heading (fl, fr, rl, rr; 4 x n) for states X
+    (6 x n: vx vy r n xi delta), the front pair steered by Ackermann (axle.py's kinematics)."""
+    vx, vy, r, delta = (np.asarray(X[i], float) for i in (0, 1, 2, 5))
+    tn, L, tr = np.tan(delta), car.wheel_base, car.track
+    steer = [np.arctan2(L * tn, L - 0.5 * tr * tn), np.arctan2(L * tn, L + 0.5 * tr * tn), 0, 0]
+    out = []
+    for (px, py), d in zip(model.wheels(car), steer):
+        out.append(np.cos(d) * (vx - r * py) + np.sin(d) * (vy + r * px))
+    return np.array(out)
+
+
+def wheel_speeds(car, X, a):
+    """The wheels' peripheral speeds (rear axle, front left, front right; 3 x n) for states X
+    (6 x n) making the forces the request a asks of the ECU: each tyre's slip at its
+    longitudinal stiffness (within KAPPA_MAX / 2) from its own ground speed."""
+    lx = wheel_lx(car, X)
+    vx = np.asarray(X[0], float)
     F = car.m * np.asarray(a, float) + car.drag * vx * vx + car.roll * car.m * G
     share = car.lr / car.wheel_base
     rear = np.where(F > 0, F, (1 - share) * F)
-    kap = np.clip(rear / (2 * car.long_stiff_value * G), -0.5 * KAPPA_MAX, 0.5 * KAPPA_MAX)
-    return vx + kap * (np.abs(vx) + model.SLIP_LONG_OFFSET)
+    front = np.minimum(F, 0.0) * share
+    c = 2 * car.long_stiff_value * G                     # a pair's stiffness
+
+    def speed(force, v):
+        kap = np.clip(force / c, -0.5 * KAPPA_MAX, 0.5 * KAPPA_MAX)
+        return np.maximum(v + kap * (np.abs(v) + model.SLIP_LONG_OFFSET), 0.0)
+
+    return np.vstack([speed(rear, 0.5 * (lx[2] + lx[3])), speed(front, lx[0]),
+                      speed(front, lx[1])])
 
 
 class Window:
@@ -187,14 +213,15 @@ class Window:
     plan's time within 0.06 % of a tightly converged IPOPT on the old form on average (2.1 % at
     worst, another local optimum). With the rear tyres' own slip (a fifth control, three more
     rows): 57 of 59, p50 0.21 s, p95 0.72 s, p99 1.1 s; the plan's sideslip on the gentle bend
-    at s 90-160 within 0.3 deg of L0's (it was 6 deg off)."""
+    at s 90-160 within 0.3 deg of L0's (it was 6 deg off). With every tyre's own (seven
+    controls, nine rows more than the ellipse): 58 of 59, p50 0.27 s, p95 0.91 s, p99 1.04 s."""
 
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
                  tol=1e-3, budget=None, warm=True, compile=True, ipopt=None):
         self.car, self.ds, self.grip, self.margin = car, ds, grip, margin
         self.N = N = int(round(length / ds)) + 1
         self.M = M = N - 1
-        self.f, self.g, lbg, ubg, self.out = node_functions(car, rear_tyre=True)
+        self.f, self.g, lbg, ubg, self.out = node_functions(car, tyres=True)
         self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
         ng = len(lbg)
         # one stage in the scaled variables
@@ -245,11 +272,38 @@ class Window:
         hs = ca.Function("l1_stage_hess", [zs, ps, lf, lm], [Hk])
         Hm = hs.map(M)(Z, Pp, lam_f, ca.reshape(lam_g[:per * M], per, M)[:6 + ng, :])
         reg = T - ca.sum2(dts)                   # the regularisation's, constant
-        Hreg = ca.Function("hreg", [W], [ca.hessian(reg, W)[0]])(np.zeros(NZ * M + 6))
+        Hreg = ca.sparsify(ca.Function("hreg", [W], [ca.hessian(reg, W)[0]])(np.zeros(NZ * M + 6)))
         H = ca.diagcat(*ca.horzsplit(Hm, NZ), ca.MX(6, 6)) + lam_f * Hreg
         hess = ca.Function("nlp_hess_l", [W, ca.vec(Pw), lam_f, lam_g], [ca.triu(H)],
                            ["x", "p", "lam_f", "lam_g"], ["triu_hess_gamma_x_x"])
-        self.solver = _compiled_nlpsol(nlp, opts, hess) if compile else None
+        # the constraints' Jacobian and the time's gradient by stages too (CasADi's own: 0.6 and
+        # 0.3 ms an iteration): each stage's block, the rest constant
+        js = ca.Function("l1_stage_jac", [zs, ps], [ca.jacobian(ca.vertcat(o[0], o[2]), zs)])
+        gs = ca.Function("l1_stage_grad", [zs, ps], [ca.gradient(o[1], zs)])
+        Jm, gm = js.map(M)(Z, Pp), gs.map(M)(Z, Pp)
+        lin = ca.DM.zeros(2, NZ)                  # the edge rows' (n, e)
+        lin[0, 3], lin[0, 6 + NU] = X_SCALE[3], 1.0
+        lin[1, 3], lin[1, 6 + NU] = X_SCALE[3], -1.0
+        blocks = [ca.vertcat(b, lin) for b in ca.horzsplit(Jm, NZ)]
+        nw = NZ * M + 6
+        couple = ca.DM.zeros(per * M + 2, nw)     # x_k+1 in stage k's dynamics; the end rows
+        for k in range(M):
+            couple[k * per:k * per + 6, (k + 1) * NZ:(k + 1) * NZ + 6] = -ca.DM.eye(6)
+        couple[per * M, NZ * M:] = ca.horzcat(END_SLIP * sx[0], sx[1], 0, 0, 0, 0)
+        couple[per * M + 1, NZ * M:] = ca.horzcat(-END_SLIP * sx[0], sx[1], 0, 0, 0, 0)
+        couple = ca.DM(ca.sparsify(couple))
+        Jg = ca.vertcat(ca.horzcat(ca.diagcat(*blocks), ca.MX(per * M, 6)), ca.MX(2, nw)) + couple
+        gvec = ca.vertcat(ca.vec(rows), end)
+        jac = ca.Function("nlp_jac_g", [W, ca.vec(Pw)], [gvec, Jg], ["x", "p"], ["g", "jac_g_x"])
+        cvec = ca.DM.zeros(nw)
+        cvec[[k * NZ + 6 + NU for k in range(M)]] = EDGE_PENALTY
+        greg = ca.mtimes(Hreg, W) + cvec          # the regularisation is quadratic (no linear
+        # term but the edge's: its own gradient at zero)
+        grad = ca.Function("nlp_grad_f", [W, ca.vec(Pw)],
+                           [T, ca.vertcat(ca.vec(gm), ca.DM.zeros(6)) + greg],
+                           ["x", "p"], ["f", "grad_f_x"])
+        own = {"nlp_hess_l": hess, "nlp_jac_g": jac, "nlp_grad_f": grad}
+        self.solver = _compiled_nlpsol(nlp, opts, own) if compile else None
         if self.solver is None:
             self.solver = ca.nlpsol("l1", "ipopt", nlp, opts)
         self.budget = budget
@@ -273,12 +327,12 @@ class Window:
         hi[0, N - 1] = min(hi[0, N - 1], v_end)
         lo[4, N - 1], hi[4, N - 1] = -END_HEADING, END_HEADING
         lo[:, 0] = hi[:, 0] = x0                            # the window starts at the state
-        ulo = np.tile([-rate, -inf, -inf, -inf, 0.0], (M, 1)).T
-        uhi = np.tile([rate, inf, inf, inf, car.wheel_speed_max or inf], (M, 1)).T
+        ulo = np.tile([-rate, -inf, -inf, -inf, 0.0, 0.0, 0.0], (M, 1)).T
+        uhi = np.tile([rate, inf, inf, inf, car.wheel_speed_max or inf, inf, inf], (M, 1)).T
         return self.pack(lo, ulo, 0.0), self.pack(hi, uhi, inf)
 
     def pack(self, X, U, e=0.0):
-        """The scaled decision vector from X (6 x N), U (5 x M) and the edge slack e."""
+        """The scaled decision vector from X (6 x N), U (7 x M) and the edge slack e."""
         Z = np.vstack([X[:, :self.M] / X_SCALE[:, None], U / U_SCALE[:, None],
                        np.full(self.M, e)])
         return np.concatenate([Z.ravel(order="F"), X[:, self.M] / X_SCALE])
@@ -298,12 +352,27 @@ class Window:
 
     def solve(self, track, i0, x0, v_end, X_init, U_init):
         """The plan from node i0 starting at state x0, warm-started from X_init (6 x N) and
-        U_init (5 x M: rate, a, ax, ay, the rear's speed; 4 rows take the rear's speed from
-        the request). Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s,
+        U_init (7 x M: rate, a, ax, ay, the wheels' speeds; fewer rows take the missing speeds
+        from the request). Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s,
         defect (the largest shooting gap)."""
         P, wl, wr, s = self.params(track, i0)
-        if U_init.shape[0] == 4:                 # a warm start without the rear's speed
-            U_init = np.vstack([U_init, rear_speed(self.car, X_init[0, :self.M], U_init[1])])
+        if U_init.shape[0] < NU:                 # a warm start without (some of) the wheels'
+            w = wheel_speeds(self.car, X_init[:, :self.M], U_init[1])
+            U_init = np.vstack([U_init[:4], w[:3] if U_init.shape[0] == 4 else
+                                np.vstack([U_init[4:5], w[1:]])])
+        # the first interval's wheels at the slips the warm start gave them, from the state the
+        # window starts at (the car's, not the last plan's there: off by a slide's vy, a front
+        # wheel's speed is off by metres a second, the slips by far past the peak)
+        U_init = np.array(U_init, float)
+        X0 = np.array(X_init[:, :1], float)
+        lx_old = wheel_lx(self.car, X0)[:, 0]
+        X0[:, 0] = x0
+        lx_new = wheel_lx(self.car, X0)[:, 0]
+        for row, old, new in ((4, 0.5 * (lx_old[2] + lx_old[3]), 0.5 * (lx_new[2] + lx_new[3])),
+                              (5, lx_old[0], lx_new[0]), (6, lx_old[1], lx_new[1])):
+            off = model.SLIP_LONG_OFFSET
+            kap = (U_init[row, 0] - old) / (abs(old) + off)
+            U_init[row, 0] = max(new + kap * (abs(new) + off), 0.0)
         lbx, ubx = self.bounds(wl, wr, x0, v_end)
         half = 0.5 * self.car.width
         Pw = np.vstack([P, wl[:self.M] - half - self.margin, wr[:self.M] - half - self.margin])
@@ -381,7 +450,7 @@ class Window:
 
 def shift(plan, k, tail_X, tail_U):
     """The warm start for the window k nodes on: the plan's nodes and controls from k, then
-    tail_X (6 x k) and tail_U (5 x k) for the stretch it did not cover."""
+    tail_X (6 x k) and tail_U (7 x k) for the stretch it did not cover."""
     X = np.hstack([plan["X"][:, k:], tail_X])
     U = np.hstack([plan["U"][:, k:], tail_U])
     return X, U[:, :X.shape[1] - 1]

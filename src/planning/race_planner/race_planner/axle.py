@@ -33,7 +33,14 @@ share) brake), held at zero by the planner (L1). Why: the ellipse let a driven r
 0.98 mu Fz along and 0.18 mu Fz across at 7 deg of slip, which PhysX's tyre cannot (0.84 mu Fz
 at most there, sliding); so L1 planned a 7 deg slide under full drive on Haruna's gentle bend at
 s 90-160 that the car could not deliver (L0 holds 1 deg there), fell 4 m/s behind and left the
-road (M3, 2026-10-30). The front pair, which only brakes, keeps the ellipse.
+road (M3, 2026-10-30). Likewise the front pair with its wheels' speeds given (`w_front`, one
+each: they only brake, through no differential): PhysX's tyre on each, and `front_balance`
+holds each one's Fx to its share of the brakes, -share brake / 2. Why: past the tyre's peak slip
+angle (8.5 deg at rest load) the ellipse is optimistic under braking (at 8 deg and 0.8 of the
+grip along, 0.58 mu Fz across against PhysX's 0.44), and a brake force past the tyre's real
+peak at that angle locks the wheel in a car without ABS: the inner front wheel locked (slip
+-0.6 to -0.8) braking into Haruna's hairpin at s 270, the car could not turn and left the road
+(M3, 2026-10-30).
 """
 import casadi as ca
 
@@ -57,10 +64,11 @@ def brake_share(car, decel=0.0):
     return ca.fmin(ca.fmax(share, 0.05), 0.95)
 
 
-def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None):
+def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
     """x = (vx, vy, r); u = (delta, a): the bicycle steering angle and the acceleration request;
     acc = (ax, ay) the loads are taken at (equal to the result in the planner); w_rear: the
-    rear axle's peripheral speed (m/s), or None for the ellipse on all four (see above).
+    rear axle's peripheral speed (m/s), or None for the ellipse there (see above); w_front:
+    the front wheels' (left, right), or None for the ellipse on them.
 
     Returns a dict: dx, acc, fz, fx and fy (each wheel's, wheel frame), use (each wheel's
     |Fx| / (mu Fz): <= 1 for the force to be carried), drive and brake (the tyre force the
@@ -86,7 +94,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None):
     fx = [-0.5 * share * brake, -0.5 * share * brake, rl, rr]
     if w_rear is not None:
         assert car.diff == "locked", "the rear tyres' own slip: a locked axle only"
-    kappas = []
+    kappas, kappas_f = [], []
     dl, dr_ = model.ackermann(car, delta)
     steer = [dl, dr_, 0.0, 0.0]
     Fx = Fy = Mz = 0.0
@@ -96,10 +104,11 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None):
         c, s = ca.cos(steer[i]), ca.sin(steer[i])
         lx, ly = c * ux + s * uy, -s * ux + c * uy
         tan_a = ly / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LAT_OFFSET)
-        if w_rear is not None and i >= 2:              # PhysX's tyre, combined slip
-            kap = (w_rear - lx) / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LONG_OFFSET)
+        w_own = (w_rear if i >= 2 else None if w_front is None else w_front[i])
+        if w_own is not None:                          # PhysX's tyre, combined slip
+            kap = (w_own - lx) / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LONG_OFFSET)
             fx[i], fy = model.tyre(car, kap, tan_a, fz[i], fz0[i], mus[i], sls[i])
-            kappas.append(kap)
+            (kappas if i >= 2 else kappas_f).append(kap)
             use = fx[i] / (mus[i] * ca.sqrt(fz[i] * fz[i] + 1.0))
             bx, by = c * fx[i] - s * fy, s * fx[i] + c * fy
             Fx, Fy = Fx + bx, Fy + by
@@ -134,4 +143,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None):
     if w_rear is not None:
         out["kappa"] = kappas
         out["rear_balance"] = out["fx"][2] + out["fx"][3] - rear
+    if w_front is not None:
+        out["kappa_front"] = kappas_f
+        out["front_balance"] = [out["fx"][j] + 0.5 * share * brake for j in (0, 1)]
     return out
