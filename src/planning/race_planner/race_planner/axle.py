@@ -56,12 +56,59 @@ def _pos(x):
     return 0.5 * (x + ca.sqrt(x * x + SMOOTH * SMOOTH))
 
 
+def _smin(a, b):
+    """min(a, b), smooth (within SMOOTH / 2)."""
+    return 0.5 * (a + b - ca.sqrt((a - b) * (a - b) + SMOOTH * SMOOTH))
+
+
+def _smax(a, b):
+    return 0.5 * (a + b + ca.sqrt((a - b) * (a - b) + SMOOTH * SMOOTH))
+
+
 def brake_share(car, decel=0.0):
-    """The front axle's share of a brake force (sim_vehicle_ecu's calibration.brake_split)."""
+    """The front axle's share of the friction brakes' split (sim_vehicle_ecu's
+    calibration.brake_split, its deceleration capped at the tyres' mu g as the ECU's EBD)."""
     share = car.lr / car.wheel_base
     if car.brake_distribution == "dynamic_axle_load":
-        share = share + car.h_cg * ca.fmax(decel, 0.0) / (G * car.wheel_base)
+        decel = ca.fmin(ca.fmax(decel, 0.0), car.mu * G)
+        share = share + car.h_cg * decel / (G * car.wheel_base)
     return ca.fmin(ca.fmax(share, 0.05), 0.95)
+
+
+def feedforward(car, a, vx):
+    """The ECU's tractive force for the request a at forward speed vx (sim_vehicle_ecu's
+    powertrain.feedforward): the car and its wheels' inertia times a, the road load and the
+    driveline's drag. Above the rolling ramp's 0.5 m/s, which a plan does not go under."""
+    mass = car.m + 2 * car.wheel_mass
+    return (mass * a + car.drag * vx * vx + car.roll * car.m * G
+            + 4 * car.wheel_damping * vx / car.r_wheel ** 2)
+
+
+def regen_max(car, vx):
+    """The most braking force (N at the tyres) the motor regenerates at forward speed vx: its
+    torque and power limits, faded out below regen_fade (powertrain.regen_limit)."""
+    R = car.r_wheel
+    lim = _smin(car.regen_torque_max / R, car.regen_power_max / ca.sqrt(vx * vx + 1.0))
+    lo, hi = car.regen_fade
+    return lim * ca.fmin(ca.fmax((vx - lo) / (hi - lo), 0.0), 1.0)
+
+
+def brakes(car, a, vx):
+    """What the ECU makes of the request a at forward speed vx (sim_vehicle_ecu's ev
+    powertrain): (drive, regen, front, rear), N at the tyres, all >= 0. A positive force drives
+    the rear. A braking force B is regenerative first, within regen_max, on the rear (the
+    driven) axle; the friction brakes are split by brake_share and the regen taken off its axle's
+    share, the excess of it (mild braking: more regen than the rear's share) coming off the
+    front's friction. So `rear` = max(regen, (1 - share) B) with the regen in it, `front` = B -
+    rear. The friction brakes' hydraulic lag (dead time 0.05 s, then 0.04 s first order on
+    drift_mustang) and the motor's (0.02 s) are left out: under a tenth of a second, inside one
+    of L1's intervals (0.13 s at 30 m/s), while a 1 s window turns on the steady split."""
+    F = feedforward(car, a, vx)
+    drive, B = _pos(F), _pos(-F)
+    share = brake_share(car, -a)
+    regen = _smin(B, regen_max(car, vx))
+    rear = _smax(regen, (1.0 - share) * B)
+    return drive, regen, B - rear, rear
 
 
 def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
@@ -79,19 +126,21 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
     mus = mu if isinstance(mu, (list, tuple)) else [mu] * 4
     sls = sliding if isinstance(sliding, (list, tuple)) else [sliding] * 4
     speed = ca.sqrt(vx * vx + vy * vy + 1e-6)
-    road = car.drag * speed * speed + car.roll * car.m * G
-    F = car.m * a + road
-    drive, brake = _pos(F), _pos(-F)
+    drive, regen, front_brake, rear_brake = brakes(car, a, vx)
+    brake = front_brake + rear_brake
     share = brake_share(car, -a)
     fz = model.loads(car, acc[0], acc[1])
     fz0 = model.rest_loads(car)
-    rear = drive - (1.0 - share) * brake
+    # what of the ECU's wheel torques the wheels keep: the driveline's drag (the feedforward
+    # adds it, PhysX's wheel damping takes it) and their own inertia at the body's acceleration
+    loss = car.wheel_damping * vx / car.r_wheel ** 2 + 0.5 * car.wheel_mass * acc[0]
+    rear = drive - rear_brake - 2 * loss
     if car.diff == "locked":
         tot = fz[2] + fz[3]
         rl, rr = rear * fz[2] / tot, rear * fz[3] / tot
     else:
         rl = rr = 0.5 * rear
-    fx = [-0.5 * share * brake, -0.5 * share * brake, rl, rr]
+    fx = [-0.5 * front_brake - loss, -0.5 * front_brake - loss, rl, rr]
     if w_rear is not None:
         assert car.diff == "locked", "the rear tyres' own slip: a locked axle only"
     kappas, kappas_f = [], []
@@ -140,10 +189,11 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
     out["acc"] = [ax, ay]
     out["fz"] = fz
     out["drive"], out["brake"], out["share"] = drive, brake, share
+    out["regen"], out["front_brake"], out["rear_brake"] = regen, front_brake, rear_brake
     if w_rear is not None:
         out["kappa"] = kappas
         out["rear_balance"] = out["fx"][2] + out["fx"][3] - rear
     if w_front is not None:
         out["kappa_front"] = kappas_f
-        out["front_balance"] = [out["fx"][j] + 0.5 * share * brake for j in (0, 1)]
+        out["front_balance"] = [out["fx"][j] + 0.5 * front_brake + loss for j in (0, 1)]
     return out

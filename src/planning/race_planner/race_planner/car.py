@@ -12,8 +12,11 @@ Only what the spec says goes in; nothing is per track. Derived quantities:
 - wheel_speed_max: the driven wheels' top peripheral speed, m/s: `ev`'s motor_max_rpm through its
   gear (None for `ideal`, which has no motor); so the car's top speed is the lower of it and
   where power meets drag.
-- regen_torque_max (at the axle) and regen_power_max: what the motor regenerates under braking,
-  within the rear's share (sim_vehicle_ecu); 0 for `ideal`.
+- regen_torque_max (at the axle) and regen_power_max: what the motor regenerates under braking
+  (sim_vehicle_ecu: first, before the friction brakes), faded out between regen_fade's speeds;
+  0 for `ideal`.
+- wheel_mass, wheel_damping: what the ECU's feedforward adds for the wheels (their inertia
+  reflected, the driveline's drag).
 - steer_rate_max: the steering actuator's rate limit, rad/s at the bicycle angle (the spec's
   `steering.rate_limit`); None when the spec sets none.
 - brake_torque_max: per wheel; brake_distribution: the axles' split of a brake demand
@@ -61,6 +64,9 @@ class Car:
     regen_torque_max: float = 0.0   # N m at the axle
     regen_power_max: float = 0.0    # W
     steer_rate_max: float = None    # rad/s; None: the spec sets none
+    wheel_mass: float = 20.0        # kg per wheel (sim_vehicle_ecu's default)
+    wheel_damping: float = 0.25     # the driveline's drag per wheel as the ECU's feedforward knows it
+    regen_fade: tuple = (1.0, 3.0)  # m/s: no regen at or below the first, full from the second
 
     def __post_init__(self):
         if self.transfer_height is None:
@@ -104,4 +110,7 @@ class Car:
             diff=p.get("differential", {}).get("type", "open"), drive_axle=p["drive_axle"],
             brake_distribution=d["brakes"].get("distribution", "dynamic_axle_load"),
             wheel_speed_max=wheel_v, regen_torque_max=regen_t, regen_power_max=regen_p,
-            steer_rate_max=rate if rate > 0 else None)
+            steer_rate_max=rate if rate > 0 else None,
+            wheel_mass=float(d.get("wheels", {}).get("mass", 20.0)),
+            wheel_damping=float(d.get("wheels", {}).get("damping_rate", 0.25)),
+            regen_fade=tuple(float(v) for v in p.get("regen_fade_speeds", (1.0, 3.0))))

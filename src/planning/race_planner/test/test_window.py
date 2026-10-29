@@ -41,7 +41,9 @@ def test_the_request_is_what_the_ecu_makes_of_it():
     assert fx[0] == pytest.approx(fx[1]) and (fx[0] + fx[1]) == pytest.approx(fx[2] + fx[3], rel=0.02)
     acc, drive, brake, fx = f([10, 0, 0], [0, 3.0], [3, 0])     # drive: the rear only
     fx = np.asarray(fx).ravel()
-    assert float(brake) < 30.0 and abs(fx[0]) < 15 and fx[2] > 0
+    # the front only loses its own wheels' drag and inertia (what the ECU's feedforward adds)
+    loss = c.wheel_damping * 10.0 / c.r_wheel ** 2 + 0.5 * c.wheel_mass * 3.0
+    assert float(brake) < 30.0 and abs(fx[0]) < loss + 15 and fx[2] > 0
 
 
 def test_a_window_through_a_bend_is_close_to_the_two_track_plan():

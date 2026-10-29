@@ -119,9 +119,6 @@ def node_functions(car, tyres=False):
                     r - kappa * sdot, u[0])
     f = ca.Function("f", [x, u, p], [dt / sdot, 1 / sdot])
     R = car.r_wheel
-    omega = vx / R
-    regen = ca.fmin(car.regen_torque_max, car.regen_power_max / ca.fmax(omega, 1.0))
-    share = o["share"]
     # each row in units of its own limit, so the solver sees numbers near one (loads in the car's
     # weight, torques in their limits, power in the motor's)
     mg = car.m * G
@@ -129,10 +126,10 @@ def node_functions(car, tyres=False):
     g = ca.vertcat(o["acc"][0] - u[2], o["acc"][1] - u[3],
                    *[fz / mg for fz in o["fz"]], *o["use"],
                    o["drive"] / t_drive, o["drive"] * vx / car.power_max,
-                   0.5 * share * o["brake"] * R / t_brake,      # each front wheel's brake torque
-                   ((1 - share) * o["brake"] * R - regen) / t_brake,   # the rear pair's friction
+                   0.5 * o["front_brake"] * R / t_brake,        # each front wheel's brake torque
+                   (o["rear_brake"] - o["regen"]) * R / t_brake,  # the rear pair's friction
                    sdot)
-    lbg = [0, 0, 0, 0, 0, 0, -1, -1, -1, -1, 0, -ca.inf, 0, -ca.inf, 0.5]
+    lbg = [0, 0, 0, 0, 0, 0, -1, -1, -1, -1, 0, -ca.inf, -ca.inf, -ca.inf, 0.5]
     ubg = [0, 0, ca.inf, ca.inf, ca.inf, ca.inf, 1, 1, 1, 1, 1, 1, 1, 2, ca.inf]
     if tyres:
         g = ca.vertcat(g, o["rear_balance"] / mg, *o["kappa"],

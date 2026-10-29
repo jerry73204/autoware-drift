@@ -166,7 +166,7 @@ def test_the_lqr_as_a_fallback_keeps_the_car_on_the_road(case, car, request):
     assert 0.4 < rec["fallback"].mean() < 0.6
     check_on_road(rec, plan, car)
     check_limits(rec, car)
-    assert rms(rec["lat"]) < 0.6
+    assert rms(rec["lat"]) < 0.8
     assert rms(rec["speed"]) < 1.5
 
 

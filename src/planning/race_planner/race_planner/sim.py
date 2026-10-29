@@ -3,7 +3,9 @@ onboard computers, so the live planner and tracker can be developed faster than 
 Isaac judges them (the live planner's design, section 6).
 
 - The body and tyres: model.py's two-track car (PhysX's tyre, swb's sliding falloff, the
-  quasi-static load transfer) with each wheel's spin a state: I w' = drive - brake - Fx R.
+  quasi-static load transfer) with each wheel's spin a state: I w' = drive - brake - Fx R
+  - d w, d the spec's wheel damping_rate (PhysX's wheel damping, which the ECU's feedforward
+  makes up for: without it the car would get 0.13 m/s^2 more than asked at 20 m/s).
   Richer than L1's axle car on purpose (wheel slip, the locked axle's scrub), so plan and plant
   disagree as plan and Isaac will.
 - The onboard computers: sim_vehicle_ecu itself (the code aib runs in Isaac), stepped at
@@ -53,6 +55,7 @@ class Plant:
         w = doc["wheels"] if "wheels" in doc else {}
         m_wheel = float(w.get("mass", 22.0))
         self.I_wheel = 0.5 * m_wheel * self.car.r_wheel ** 2
+        self.damping = float(w.get("damping_rate", 0.0))
         xs, us, acc = ca.SX.sym("x", 3), ca.SX.sym("u", 5), ca.SX.sym("acc", 2)
         mu, sl = ca.SX.sym("mu"), ca.SX.sym("sl")
         o = model.dynamics(self.car, [xs[0], xs[1], xs[2]], [us[i] for i in range(5)], mu,
@@ -132,7 +135,8 @@ class Plant:
                 wdot = np.zeros(4)
                 for k in range(4):
                     brake = act.brake[k] * math.tanh(self.w[k] / 0.5)
-                    wdot[k] = (act.drive[k] - brake - torque[k]) / self.I_wheel
+                    wdot[k] = (act.drive[k] - brake - torque[k]
+                               - self.damping * self.w[k]) / self.I_wheel
                 self.v = self.v + h * dx
                 self.w = self.w + h * wdot
                 self.w = np.where(np.abs(self.w) < 1e-3, 0.0, self.w)
