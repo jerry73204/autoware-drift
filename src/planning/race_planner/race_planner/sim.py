@@ -1,0 +1,145 @@
+"""A model-in-the-loop plant: the car the planner models, integrated in time, behind the car's own
+onboard computers, so the live planner and tracker can be developed faster than real time before
+Isaac judges them (the live planner's design, section 6).
+
+- The body and tyres: model.py's two-track car (PhysX's tyre, swb's sliding falloff, the
+  quasi-static load transfer) with each wheel's spin a state: I w' = drive - brake - Fx R.
+  Richer than L1's axle car on purpose (wheel slip, the locked axle's scrub), so plan and plant
+  disagree as plan and Isaac will.
+- The onboard computers: sim_vehicle_ecu itself (the code aib runs in Isaac), stepped at
+  Isaac's 60 Hz with the car's own sensors (wheel speeds, yaw rate, accelerations); the body
+  and wheels at 8 substeps of it, as PhysX's vehicle.
+- The road: the track's friction, sliding share and grade at the car's nearest node.
+- A wrong plant on request: grip and load transfer scaled (mu_scale, transfer_scale), the
+  plan's model left as it is.
+
+sim_vehicle_ecu is found beside this repository's checkout of the superproject
+(SWB/src/sim_vehicle_ecu, SWB from the environment, default ~/repos/carla-scenario-bridge).
+"""
+from dataclasses import replace
+import math
+import os
+import sys
+
+import casadi as ca
+import numpy as np
+import yaml
+
+from race_planner import model
+
+SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
+ECU_RATE, SUBSTEPS = 60.0, 8
+
+
+def _ecu_module():
+    path = os.path.join(SWB, "src", "sim_vehicle_ecu")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    import sim_vehicle_ecu
+    return sim_vehicle_ecu
+
+
+class Plant:
+    """The car on `track`. State: x, y, psi (map frame, the CoM), vx, vy, r (body), the four
+    wheels' spin w (rad/s) and the steering's actual angle."""
+
+    def __init__(self, car, spec_path, track, mu_scale=1.0, transfer_scale=1.0):
+        ecu = _ecu_module()
+        doc = yaml.safe_load(open(spec_path))
+        self.ecu_mod = ecu
+        self.ecu = ecu.Ecu(ecu.Calibration.from_spec(doc))
+        self.car = replace(car, transfer_height=car.transfer_height * transfer_scale)
+        self.track, self.mu_scale = track, mu_scale
+        w = doc["wheels"] if "wheels" in doc else {}
+        m_wheel = float(w.get("mass", 22.0))
+        self.I_wheel = 0.5 * m_wheel * self.car.r_wheel ** 2
+        xs, us, acc = ca.SX.sym("x", 3), ca.SX.sym("u", 5), ca.SX.sym("acc", 2)
+        mu, sl = ca.SX.sym("mu"), ca.SX.sym("sl")
+        o = model.dynamics(self.car, [xs[0], xs[1], xs[2]], [us[i] for i in range(5)], mu,
+                           [acc[0], acc[1]], sl)
+        self.f = ca.Function("f", [xs, us, acc, mu, sl],
+                             [ca.vertcat(*o["dx"]), ca.vertcat(*o["acc"]),
+                              ca.vertcat(*o["torque"]), ca.vertcat(*o["fz"])])
+        self.t = 0.0
+        self.acc = np.zeros(2)
+        self.last_act = None
+
+    def reset(self, s=None, n=0.0, speed=5.0, heading_error=0.0):
+        """Put the car on the track at node nearest s (default its start), at offset n, rolling
+        straight at `speed`."""
+        tr = self.track
+        i = 0 if s is None else int(np.argmin(np.abs(tr.s - s)))
+        psi = float(tr.psi[i]) + heading_error
+        nx, ny = -math.sin(tr.psi[i]), math.cos(tr.psi[i])
+        self.x, self.y, self.psi = float(tr.x[i] + n * nx), float(tr.y[i] + n * ny), psi
+        self.v = np.array([speed, 0.0, 0.0])
+        self.w = np.full(4, speed / self.car.r_wheel)
+        self.delta = 0.0
+        self.t, self.i, self.t_target = 0.0, i, 0.0
+        self.acc = np.zeros(2)
+        self.ecu.reset() if hasattr(self.ecu, "reset") else None
+        return self.state()
+
+    def nearest(self):
+        tr = self.track
+        lo, hi = max(0, self.i - 20), min(len(tr.s), self.i + 60)
+        d = np.hypot(tr.x[lo:hi] - self.x, tr.y[lo:hi] - self.y)
+        self.i = lo + int(np.argmin(d))
+        return self.i
+
+    def state(self):
+        """The car's state in the planner's terms: s, n, xi (on the track) and vx, vy, r, delta,
+        plus x, y, psi and the wheels."""
+        tr, i = self.track, self.nearest()
+        ps = float(tr.psi[i])
+        dx, dy = self.x - tr.x[i], self.y - tr.y[i]
+        along = dx * math.cos(ps) + dy * math.sin(ps)
+        n = -dx * math.sin(ps) + dy * math.cos(ps)
+        xi = (self.psi - ps + math.pi) % (2 * math.pi) - math.pi
+        return {"t": self.t, "s": float(tr.s[i] + along), "n": n, "xi": xi,
+                "vx": float(self.v[0]), "vy": float(self.v[1]), "r": float(self.v[2]),
+                "delta": self.delta, "x": self.x, "y": self.y, "psi": self.psi,
+                "w": self.w.copy(), "ax": float(self.acc[0]), "ay": float(self.acc[1]),
+                "i": i}
+
+    def step(self, accel, tire_angle, velocity=60.0, dt=1.0 / ECU_RATE):
+        """Advance dt with the vehicle interface's request held: the ECU's 60 Hz steps that fall
+        in it (the remainder carried to the next call, as a fixed-rate physics would)."""
+        ecu = self.ecu_mod
+        self.t_target = getattr(self, "t_target", self.t) + dt
+        R = self.car.r_wheel
+        while self.t + 0.5 / ECU_RATE <= self.t_target:
+            sensors = ecu.Sensors(tuple(float(w) for w in self.w), float(self.v[2]),
+                                  float(self.acc[0]), float(self.acc[1]))
+            act = self.ecu.step(ecu.Request(float(accel), float(velocity), float(tire_angle)),
+                                sensors, 1.0 / ECU_RATE)
+            self.last_act = act
+            self.delta = float(act.tire_angle)
+            h = 1.0 / ECU_RATE / SUBSTEPS
+            i = self.nearest()
+            mu = float(self.track.mu[i]) * self.mu_scale
+            sl = float(self.track.sliding[i])
+            grade = float(self.track.grade[i])
+            for _ in range(SUBSTEPS):
+                u = [self.delta] + list(self.w * R)
+                dx, acc, torque, fz = (np.asarray(q).ravel() for q in
+                                       self.f(self.v, u, self.acc, mu, sl))
+                # grade along the body's heading on the track (the planner's sign: a + grade climbs)
+                xi = self.psi - float(self.track.psi[i])
+                g_t = 9.81 * grade / math.sqrt(1 + grade * grade)
+                dx = dx + np.array([-g_t * math.cos(xi), g_t * math.sin(xi), 0.0])
+                # the wheels: drive and brake torque against the tyre's (torque = Fx R)
+                wdot = np.zeros(4)
+                for k in range(4):
+                    brake = act.brake[k] * math.tanh(self.w[k] / 0.5)
+                    wdot[k] = (act.drive[k] - brake - torque[k]) / self.I_wheel
+                self.v = self.v + h * dx
+                self.w = self.w + h * wdot
+                self.w = np.where(np.abs(self.w) < 1e-3, 0.0, self.w)
+                self.acc = acc
+                c, s = math.cos(self.psi), math.sin(self.psi)
+                self.x += h * (c * self.v[0] - s * self.v[1])
+                self.y += h * (s * self.v[0] + c * self.v[1])
+                self.psi += h * self.v[2]
+            self.t += 1.0 / ECU_RATE
+        return self.state()
