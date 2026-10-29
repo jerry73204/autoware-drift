@@ -67,6 +67,8 @@ class Car:
     wheel_mass: float = 20.0        # kg per wheel (sim_vehicle_ecu's default)
     wheel_damping: float = 0.25     # the driveline's drag per wheel as the ECU's feedforward knows it
     regen_fade: tuple = (1.0, 3.0)  # m/s: no regen at or below the first, full from the second
+    est_mu_recover_rate: float = 0.1  # 1/s: the ECU's friction estimate's recovery away from the
+    # limit (sim_vehicle_ecu's estimator; a calibration default, the spec does not set it)
 
     def __post_init__(self):
         if self.transfer_height is None:

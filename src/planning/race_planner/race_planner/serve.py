@@ -84,7 +84,8 @@ def main():
         st = msg["state"]
         s, n, xi = frenet(st["x"], st["y"], st["yaw"])
         state = {"t": st["t"], "s": s, "n": n, "xi": xi, "vx": st["vx"], "vy": st["vy"],
-                 "r": st["r"], "delta": st["delta"]}
+                 "r": st["r"], "delta": st["delta"],
+                 "mu_ratio": float(st.get("mu_ratio", 1.0))}   # the car's friction estimate
         if not started:
             driver.start(state)
             started = True

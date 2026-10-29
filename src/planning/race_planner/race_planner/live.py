@@ -20,10 +20,15 @@ import numpy as np
 
 from race_planner.line import min_curvature_line
 from race_planner.qss import speed_profile
-from race_planner.window import Window, initial
+from race_planner.window import G, Window, friction_ahead, friction_scale, initial
 
 # leaving the plan's envelope re-plans at once (set once on the proving ground, not per track)
 ENVELOPE_LAT, ENVELOPE_BETA, ENVELOPE_SPEED = 0.5, math.radians(5.0), 2.0
+# and when the car finds the road markedly slipperier than the plan assumed: its friction scale
+# (window.friction_scale) this far below the plan's, a share of the grip; about the margin L1
+# keeps (grip 0.92), so a plan is replaced once the car has found less than it left for L2
+ENVELOPE_MU = 0.08
+MU_BETA = math.radians(2.5)    # the car's sideslip past the plan's that says it is at the limit
 REPLAN_PERIOD = 1.0
 # the car stops (L2's safety layer, design 4.3): after this many failed solves in a row, past this
 # sideslip (a spin), or within this distance of the plan's end with no newer plan
@@ -107,6 +112,7 @@ class Driver:
         self.fails = 0                 # failed solves in a row
         self.stopping = None           # why the car is being stopped, once it is
         self.stop_law = SimpleTracker(self.car)
+        self.plan_mu = 1.0             # the friction scale the current plan was made with
 
     def v_end(self, i0):
         s_end = self.track.s[min(i0 + self.warm.N - 1, len(self.track.s) - 1)]
@@ -125,14 +131,45 @@ class Driver:
         X, U = initial(self.cold.section(self.track, i0), self.car, v_start=state["vx"])
         x0 = self.x_of(state)
         X[:, 0] = x0
-        plan = self.cold.solve(self.track, i0, x0, self.v_end(i0), X, U)
+        plan = self.cold.solve(self.track, i0, x0, self.v_end(i0), X, U,
+                               mu_scale=self.mu_ahead(state, i0))
         self.warm.lam, self.warm.lam_x = self.cold.lam, self.cold.lam_x   # as a pair, or not at all
         if not plan["ok"]:
             raise RuntimeError(f"no first plan: {plan['status']}")
-        self.plan, self.plan_t0 = plan, state["t"]
+        self.plan, self.plan_t0, self.plan_mu = plan, state["t"], self.plan_mu_next
         self.next_replan = state["t"] + REPLAN_PERIOD
         # the warm solver is built on its first call: do it now, off the clock
         self._replan(state, adopt_now=True)
+
+    def mu_scale(self, state):
+        """The car's friction scale where it is (window.friction_scale; 1 without an estimate),
+        against what the plan asks of the car there."""
+        if "mu_ratio" not in state or self.plan is None:
+            return 1.0
+        mu_map = float(np.interp(state["s"], self.track.s, self.track.mu))
+        s = min(max(state["s"], self.plan["s"][0]), self.plan["s"][-2])
+        ax = float(np.interp(s, self.plan["s"][:-1], self.plan["U"][2]))
+        ay = float(np.interp(s, self.plan["s"][:-1], self.plan["U"][3]))
+        self.demand = math.hypot(ax, ay) / G
+        # and only where the car shows it, sliding more than the plan meant: on dry asphalt the
+        # estimate read 0.6 against a demand of 0.75-0.8 g with the car on the plan's sideslip
+        # (Haruna s 204), in the patch 0.67-0.72 against 0.83 with the car sliding 1.5-5 deg more
+        X, _, _ = plan_at(self.plan, state["s"])
+        beta = math.atan2(state["vy"], max(state["vx"], 0.5))
+        if abs(beta) - abs(math.atan2(X[1], max(X[0], 0.5))) < MU_BETA:
+            return 1.0
+        return friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip)
+
+    def pending_mu(self):
+        return self.pending[2] if self.pending is not None else 1.0
+
+    def mu_ahead(self, state, i0):
+        """The friction scale over the window from node i0 (window.friction_ahead), from the
+        car's estimate now, the window's nodes measured from the car."""
+        scale = self.mu_scale(state)
+        self.plan_mu_next = scale
+        d = self.track.s[i0:i0 + self.warm.N] - state["s"]
+        return friction_ahead(self.car, scale, d, math.hypot(state["vx"], state["vy"]))
 
     def off_plan(self, state):
         X, _, _ = plan_at(self.plan, state["s"])
@@ -174,7 +211,8 @@ class Driver:
             # difference eased out over the first nodes, so the warm start is near feasible
             k = min(BLEND, Xw.shape[1])
             Xw[:, :k] += np.outer(x0 - Xw[:, 0], 1.0 - np.arange(k) / k)
-        new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw)
+        new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw,
+                              mu_scale=self.mu_ahead(state, i0))
         self.solves.append({"t": state["t"], "s": state["s"], "ok": new["ok"],
                             "iters": new["iters"], "solve_s": new["solve_s"],
                             "status": new["status"]})
@@ -182,7 +220,7 @@ class Driver:
         ready = state["t"] + (0.0 if adopt_now else max(lead_t, new["solve_s"]))
         self.busy_until = ready        # one solver: the next solve starts after this one ends
         if new["ok"]:
-            self.pending = (ready, new)
+            self.pending = (ready, new, self.plan_mu_next)
             self.fails = 0
         else:
             self.fails += 1
@@ -190,10 +228,14 @@ class Driver:
     def step(self, state):
         t = state["t"]
         if self.pending is not None and t >= self.pending[0]:
-            self.plan, self.plan_t0 = self.pending[1], self.pending[0]
+            self.plan, self.plan_t0, self.plan_mu = self.pending[1], self.pending[0], self.pending[2]
             self.pending = None
         reason = None
-        if self.pending is None and t >= self.busy_until:
+        if self.mu_scale(state) < min(self.plan_mu, self.pending_mu()) - ENVELOPE_MU:
+            # the road is slipperier than any plan made or in the making knows: a new one at once,
+            # the solve in hand dropped (its plan is for a road that is not there)
+            reason, self.pending, self.busy_until = "mu_drop", None, t
+        elif self.pending is None and t >= self.busy_until:
             if t >= self.next_replan:
                 reason = "timer"
             elif self.off_plan(state):
@@ -210,7 +252,8 @@ class Driver:
             elif state["s"] > self.plan["s"][-1] - END_MARGIN and self.pending is None:
                 self.stopping = "plan end"
         if self.stopping is None:
-            cmd = self.tracker.step(state, self.plan, self.plan_t0)
+            cmd = self.tracker.step(dict(state, mu_scale=self.mu_scale(state)), self.plan,
+                                    self.plan_t0)
         else:
             cmd = self.stop(state, beta)
         X, _, _ = plan_at(self.plan, state["s"])
@@ -221,6 +264,9 @@ class Driver:
                          "beta_plan_deg": round(math.degrees(math.atan2(X[1], max(X[0], 0.5))), 2),
                          "accel": round(cmd["accel"], 2), "steer_deg": round(math.degrees(cmd["tire_angle"]), 2),
                          "replan": reason, "fallback": cmd.get("fallback", False),
+                         "mu_ratio": round(float(state.get("mu_ratio", 1.0)), 3),
+                         "mu_scale": round(self.mu_scale(state), 3),
+                         "demand_g": round(getattr(self, "demand", 0.0), 3),
                          "stopping": self.stopping})
         return cmd
 

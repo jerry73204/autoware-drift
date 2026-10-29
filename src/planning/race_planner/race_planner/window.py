@@ -101,6 +101,44 @@ def _load(src, key, opts):
     return ca.nlpsol("l1", "ipopt", lib, opts)
 
 
+def friction_scale(car, mu_map, mu_ratio, demand, grip=1.0):
+    """The share of the map's friction mu_map the car has found where it is, from its own
+    estimate mu_ratio (sim_vehicle_ecu's estimator over the tyre's design friction) and the
+    acceleration the plan asks of it there (demand, in g).
+
+    The estimator finds the road's friction only at the limit, as the acceleration the car
+    reaches there (in g, plus est_margin); away from it it drifts back to its prior, the design
+    friction (car.mu, 1.0: the tyre's own, while dry asphalt gives 1.12 g). Its test for the
+    limit fires on dry asphalt too (turning less than a neutral bicycle would: every car does at
+    speed): on Haruna it read 0.3-0.6 on straights at 1.3 m/s^2, and 0.55 pulling away, where a
+    rear-driven car's limit is its rear axle's, half the car's. So the estimate is believed only
+    where the plan asks for the road's grip (its demand at least LIMIT_SHARE of its grip times
+    the map's friction: a corner's entry, apex and exit, not a straight's drive) and says the
+    car could not do it (below the demand by more than the estimator's own margin). Then: the
+    estimate in g against the map's friction."""
+    est = mu_ratio * car.mu
+    if (mu_ratio >= 1.0 or demand < LIMIT_SHARE * grip * mu_map
+            or est >= demand - EST_MARGIN):
+        return 1.0
+    return float(min(1.0, est / mu_map))
+
+
+def friction_ahead(car, scale, s, speed):
+    """The friction's scale along a window (s: its nodes' distances from the car, m): the car's
+    scale at the car, back to 1 over the distance the car covers while the estimator itself
+    recovers from it ((1 - scale) / est_mu_recover_rate seconds at the car's speed): the estimate
+    is trusted as far as the estimator would keep it, no further (a patch of low friction is
+    known only where the car has met it; the road beyond it is the map's)."""
+    if scale >= 1.0:
+        return np.ones_like(np.asarray(s, float))
+    reach = max(speed, 1.0) * (1.0 - scale) / car.est_mu_recover_rate
+    return scale + (1.0 - scale) * np.clip(np.asarray(s, float) / reach, 0.0, 1.0)
+
+
+EST_MARGIN = 0.05      # g: sim_vehicle_ecu's est_mu_margin, what its estimate adds at the limit
+LIMIT_SHARE = 0.7      # a plan asking this much of its grip there is near the road's limit
+
+
 def node_functions(car, tyres=False):
     """f(x, u, p) -> (dx/ds, dt/ds); g(x, u, p) -> path constraints within (lbg, ubg).
 
@@ -356,19 +394,22 @@ class Window:
         X = np.hstack([Z[:6] * X_SCALE[:, None], (np.asarray(w).ravel()[NZ * M:] * X_SCALE)[:, None]])
         return X, Z[6:6 + NU] * U_SCALE[:, None]
 
-    def params(self, track, i0):
-        """The window's track parameters from node i0 of `track` (on this window's grid)."""
+    def params(self, track, i0, mu_scale=None):
+        """The window's track parameters from node i0 of `track` (on this window's grid), the
+        friction times mu_scale (a number, or one per node; see friction_ahead)."""
         sl = slice(i0, i0 + self.N)
-        P = np.vstack([track.kappa[sl], self.grip * track.mu[sl], track.grade[sl],
+        mu = track.mu[sl] * (1.0 if mu_scale is None else np.asarray(mu_scale)[:len(track.mu[sl])])
+        P = np.vstack([track.kappa[sl], self.grip * mu, track.grade[sl],
                        track.sliding[sl]])[:, :self.M]
         return P, track.w_left[sl], track.w_right[sl], track.s[sl]
 
-    def solve(self, track, i0, x0, v_end, X_init, U_init):
+    def solve(self, track, i0, x0, v_end, X_init, U_init, mu_scale=None):
         """The plan from node i0 starting at state x0, warm-started from X_init (6 x N) and
         U_init (7 x M: rate, a, ax, ay, the wheels' speeds; fewer rows take the missing speeds
-        from the request). Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s,
-        defect (the largest shooting gap)."""
-        P, wl, wr, s = self.params(track, i0)
+        from the request). mu_scale: the friction's scale over the window (friction_ahead).
+        Returns a dict: X, U, s, t (per node), time, ok, status, iters, solve_s, defect (the
+        largest shooting gap)."""
+        P, wl, wr, s = self.params(track, i0, mu_scale)
         if U_init.shape[0] < NU:                 # a warm start without (some of) the wheels'
             w = wheel_speeds(self.car, X_init[:, :self.M], U_init[1])
             U_init = np.vstack([U_init[:4], w[:3] if U_init.shape[0] == 4 else

@@ -263,7 +263,9 @@ class Tracker:
     """The NMPC (real-time iteration) over `horizon` seconds on a grid of `dt`, built once.
 
     step(state, plan, plan_t0) -> {accel, tire_angle, ok, solve_s, fallback}: state is the car's
-    (sim.Plant's dict: s n xi vx vy r delta), plan L1's (window.Window.solve's dict), plan_t0
+    (sim.Plant's dict: s n xi vx vy r delta, and mu_scale, the share of the map's friction the
+    car has found, if known: the horizon's friction is scaled by it, live.Driver sets it from
+    the car's estimate, window.friction_scale), plan L1's (window.Window.solve's dict), plan_t0
     its start time on the caller's clock. tire_angle is the commanded angle, delta integrated
     over the tick at the first stage's rate; accel the first stage's request."""
 
@@ -394,11 +396,12 @@ class Tracker:
         Xs[:, 0] = x0
         return Xs, Us, accs
 
-    def _params(self, X, acc, plan):
+    def _params(self, X, acc, plan, mu_scale=1.0):
         N = self.N
         ref, a, _, _ = plan.at(X[0, 1:])
         _, aref, _, _ = plan.at(X[0, :N])
         kappa, mu, grade, sl, _, _ = _track_at(self.track, X[0, :N])
+        mu = mu * mu_scale             # the car's own estimate, over the whole second ahead
         _, _, _, _, wl, wr = _track_at(self.track, X[0, :N])
         m = self.half + EDGE_MARGIN
         P = np.vstack([kappa, mu, grade, sl, acc])
@@ -425,7 +428,7 @@ class Tracker:
         x0 = np.array([state["s"], state["n"], state["xi"], state["vx"], state["vy"],
                        state["r"], self.delta, self.a_prev])
         X, U, acc = self._guess(x0, self.plan)
-        p = self._params(X, acc, self.plan)
+        p = self._params(X, acc, self.plan, state.get("mu_scale", 1.0))
         w = self._pack(X, U)
         H, grad, C, Jc = self.qp(w, p)
         lbw, ubw = self.lbw - w, self.ubw - w
