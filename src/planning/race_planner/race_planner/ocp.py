@@ -180,11 +180,14 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
             np.asarray(get(U)).reshape(7, M))
 
 
-def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False):
+def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False,
+                   grip=1.0):
     """The minimum-time trajectory along `track` for `car`. Open tracks start at v_start (m/s,
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
     the controls), ok, status, time and violation (the worst of each constraint and where).
+    grip: the share of the road's friction the plan may use (1: all of it); below 1 it leaves a
+    tracker room for what the model gets wrong at the limit.
 
     Two solves: first with each wheel's torque free within its brake and the motor, from the
     minimum-curvature line's warm start; then the car's own, from that. Started cold, the brake system's coupling
@@ -199,7 +202,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     else:
         h = np.diff(s)
     M = len(h)
-    P = np.vstack([track.kappa, track.mu, track.grade, track.sliding])
+    P = np.vstack([track.kappa, grip * track.mu, track.grade, track.sliding])
     X0, U0 = _warm_start(track, car, margin, v_start)
     ok, status, Xv, Uv = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
                                 max_iter, verbose, 0.0)
