@@ -91,6 +91,9 @@ class Driver:
     length: float = 200.0
     grip: float = 0.92
     budget: float = 1.0            # s: L1's wall-clock budget, and the latency a plan is made for
+    # the car's friction estimate (mu_ratio) used at all: off by default (roadmap 060 M6: it saved
+    # 0.1 s on a x0.8 patch and made a x0.7 patch a crash, its scale back to the map's too soon)
+    use_estimate: bool = False
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -159,7 +162,7 @@ class Driver:
     def mu_scale(self, state):
         """The car's friction scale where it is (window.friction_scale; 1 without an estimate),
         against what the plan asks of the car there."""
-        if "mu_ratio" not in state or self.plan is None:
+        if not self.use_estimate or "mu_ratio" not in state or self.plan is None:
             return 1.0
         mu_map = float(np.interp(state["s"], self.track.s, self.track.mu))
         s = min(max(state["s"], self.plan["s"][0]), self.plan["s"][-2])

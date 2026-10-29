@@ -73,7 +73,8 @@ def main():
     track = track.resampled(float(init.get("ds", 4.0)))
     driver = live.Driver(car, track, Tracker(car, track), l0=l0,
                          ds=float(init.get("ds", 4.0)), length=float(init.get("length", 200.0)),
-                         grip=float(init.get("grip", 0.92)), budget=float(init.get("budget", 1.0)))
+                         grip=float(init.get("grip", 0.92)), budget=float(init.get("budget", 1.0)),
+                         use_estimate=bool(init.get("friction_estimate", False)))
     frenet = Frenet(track, None if lap is None else int(lap / float(track.s[1] - track.s[0])))
     _out({"ready": True, "s0": float(track.s[0])})
     started = False
