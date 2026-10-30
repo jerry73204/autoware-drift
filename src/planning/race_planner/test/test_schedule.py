@@ -101,7 +101,12 @@ def test_dry_open_asphalt_runs_g_alone_and_only_a_hairpin_whose_gain_clears_the_
     assert s.corner_starts(corner(60.0, math.pi / 2, {"asphalt": 1.0}))[0] == set()
     assert s.corner_starts(corner(40.0, math.pi, {"asphalt": 1.0}))[0] == set()
     # R 9 pays 0.40 % (>= the 0.3 % switch threshold), R 15 0.23 %: not every hairpin
-    assert s.corner_starts(corner(10.0, math.radians(170), {"asphalt": 1.0}))[0] == {"H", "D"}
+    assert s.corner_starts(corner(9.0, math.radians(170), {"asphalt": 1.0}))[0] == {"H", "D"}
+    assert s.corner_starts(corner(9.4, math.radians(170), {"asphalt": 1.0}))[0] == {"H", "D"}
+    # M4b: no stretch past the measured R 9 on a class that falls off (Haruna's R 9.9-11.2 m
+    # hairpins lost 0.09 s with D on the plant)
+    assert s.corner_starts(corner(9.9, math.radians(170), {"asphalt": 1.0}))[0] == set()
+    assert s.corner_starts(corner(10.0, math.radians(170), {"asphalt": 1.0}))[0] == set()
     assert s.corner_starts(corner(12.0, math.radians(170), {"asphalt": 1.0}))[0] == set()
     assert s.corner_starts(corner(15.0, math.pi, {"asphalt": 1.0}))[0] == set()
     assert s.corner_starts(corner(10.0, math.radians(100), {"asphalt": 1.0}))[0] == set()
@@ -118,6 +123,9 @@ def test_loose_ground_without_fall_off_adds_f_into_hairpins_ice_only_h():
     assert s.corner_starts(corner(15.0, math.pi, {"gravel": 1.0}))[0] == set()      # 0.15 % < 0.3
     assert s.corner_starts(corner(25.0, math.pi / 2, {"mud_wet": 1.0}))[0] == {"H", "D"}  # 0.12 %
     assert s.corner_starts(corner(9.0, math.pi, {"ice": 1.0}))[0] == {"H"}
+    # the stretch stays on a class without fall-off, goes on one with it
+    assert s.corner_starts(corner(11.0, math.pi, {"mud_wet": 1.0}))[0] == {"H", "D", "F"}
+    assert s.corner_starts(corner(11.0, math.pi, {"gravel": 1.0}))[0] == set()
 
 
 def test_a_class_above_p_add_adds_its_starts_below_it_does_not():

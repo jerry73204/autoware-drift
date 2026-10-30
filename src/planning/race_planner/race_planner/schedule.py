@@ -18,7 +18,8 @@ runs.
   first whose turn-in is SEED_LEAD or more ahead: the corner the seeds go into), the union over
   every class at least p_add probable (loose in):
     D  where a drift pays (the map: above gain_min on a class without fall-off; on one that falls
-       off, asphalt among them, only above gain_falloff, the switch threshold), or on a steep
+       off, asphalt among them, only above gain_falloff, the switch threshold, and only up to
+       the measured cell's radius), or on a steep
        downhill on low friction;
     H  with D, and wherever the window holds low friction (the fallback when G fails);
     F  with D into a hairpin on a surface without fall-off (tighter than F_R_DRY on asphalt-like
@@ -45,6 +46,9 @@ RULES = {
     "gain_falloff": 0.3,    # %: on a class that falls off past the peak (asphalt, gravel, packed
                             #   snow), only a cell whose drift clears the switch threshold pays
     "r_tol": 1.25,          # a corner up to this times a paying cell's radius pays
+    "r_tol_falloff": 1.05,  # on a class that falls off: only the measured cell's radius (and the
+                            #   corner finder's discretisation), not the stretch (roadmap 061
+                            #   M4b: D into asphalt R 9.9-11.2 m hairpins cost 0.09 s on the plant)
     "turn_tol": math.radians(30.0),   # and turning down to this less than it
     "ahead": 25.0,          # m: no new D or F into a corner whose turn-in is nearer
     "mu_fallback": 0.45,    # a class's mu (swb's, dry asphalt 1.12) this low or lower: H runs
@@ -100,10 +104,14 @@ class DriftMap:
         road `width` m wide (None: unknown, the narrowest measured). falloff: the class falls off
         past its peak, so its cell must clear gain_falloff (the switch threshold: a D start whose
         gain the gate would never take is a core spent for nothing where G does not fail), not
-        gain_min (roadmap 061 M4's tightened asphalt rule)."""
+        gain_min (roadmap 061 M4's tightened asphalt rule), and the corner must be no wider in
+        radius than the cell itself (r_tol_falloff, M4b: between the measured R 9 and R 15 the
+        gain is the model's interpolation, and on the plant D into R 10-11 m asphalt hairpins
+        lost time), not up to r_tol x it."""
         r = self.rules
         g_min = r["gain_falloff"] if falloff else r["gain_min"]
-        return any(g >= g_min and R <= Rm * r["r_tol"] and turn >= tm - r["turn_tol"]
+        r_tol = r["r_tol_falloff"] if falloff else r["r_tol"]
+        return any(g >= g_min and R <= Rm * r_tol and turn >= tm - r["turn_tol"]
                    for Rm, tm, g, _ in self._cells(c, width))
 
 
