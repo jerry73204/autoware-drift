@@ -273,3 +273,17 @@ def test_scheduled_on_a_mud_hairpin_runs_h_and_d_and_finishes():
     recs = d.multi.records
     assert any({"H", "D"} <= set(r["slots"]) for r in recs)
     assert any(r["seeds"]["H"]["ok"] for r in recs if "H" in r["seeds"])
+
+
+def test_h_is_the_fallback_adopted_only_when_no_free_start_has_a_plan():
+    m = MultiStart.__new__(MultiStart)
+    m.threshold, m.confirm, m.ahead, m.mode, m.count = 0.003, 2, 25.0, "grip", 0
+    m.h_competes = False
+    g_drift = {"ok": True, "time": 20.0, "mode": "drift", "onset": 40.0}
+    h = {"ok": True, "time": 20.1, "mode": "grip", "onset": None}
+    assert m.choose({"G": g_drift, "H": h}) == "G" and m.mode == "drift"   # as M3: G decides
+    m.mode = "grip"
+    failed = {"ok": False, "time": 0.0, "mode": None, "onset": None, "iters": 400}
+    assert m.choose({"G": failed, "H": h}) == "H" and m.mode == "grip"
+    m.h_competes, m.mode = True, "grip"
+    assert m.choose({"G": g_drift, "H": h}) == "H"                          # weighed: held once

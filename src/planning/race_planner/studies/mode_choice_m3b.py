@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from race_planner import modes  # noqa: E402
+from race_planner import live, modes  # noqa: E402
 from race_planner.car import Car  # noqa: E402
 from race_planner.live import Driver  # noqa: E402
 from race_planner.multistart import MultiStart  # noqa: E402
@@ -48,6 +48,7 @@ SWB = e1.SWB
 OUT = os.environ.get("M3B_OUT", os.path.join(SWB, "play_log/race_planner/mode_choice/m3b"))
 GRIP, DS, DT, SEED_BUDGET = e1.GRIP, e1.DS, e1.DT, e1.SEED_BUDGET
 APPROACH = 60.0
+SPIN_DEG = 89.0       # deg: the follower stops past this sideslip (live's 60 is the plant's)
 # the zones course: each of E1's CHAIN corners in order, its class (declared = true)
 ZONES = ("asphalt?", "mud_wet", "snow_loose", "gravel", "ice", "snow_loose", "snow_packed",
          "asphalt", "mud_wet", "asphalt")
@@ -94,6 +95,9 @@ def expected(track, smap, car):
 
 
 def run(course_name, config, cpus=None):
+    # the spin stop is the plant's safety rule (a car past 60 deg of sideslip); with no plant the
+    # car is its plan, and on mud M2's tyre plans hairpins past it (single: stopped at s 248)
+    live.SPIN_BETA = math.radians(SPIN_DEG)
     car = Car.from_spec(e1.SPEC)
     track, smap = course(course_name, car)
     ms = None

@@ -290,8 +290,9 @@ on the window ahead decides which starts run, and the derivative solver refines 
 ```
 
 **The starts.** G: the last adopted plan shifted (060's only start). H: grip held at the rear
-tyre's peak slip angle (`rear_alpha_max`), so a grip plan always exists to weigh a slide
-against (a free G slides by itself on low friction). D: rear out at turn-in, from its own last
+tyre's peak slip angle (`rear_alpha_max`), so a grip plan always exists (a free G slides by
+itself on low friction): the fallback, adopted only when no free start has a plan (weighed by
+the gate it held grip on its slower plan wherever G slid by itself: Tsukuba +0.55 %, M3b). D: rear out at turn-in, from its own last
 plan, else the nearest corner archetype in `corner_library.npz` (solved offline by fall-off
 continuation), else a synthetic profile. F: a pendulum flick.
 
@@ -303,12 +304,17 @@ continuation), else a synthetic profile. F: a pendulum flick.
 | a dry asphalt hairpin (>= 150 deg, R <= 25 m) | G, H, D |
 | the same at R <= 9 m on a surface without fall-off | + F |
 | a hairpin (R <= 25 m) on loose ground falling off past the peak (gravel, dirt, grass) or packed snow | G, H, D |
-| any corner on loose ground that does not fall off (mud, sand, loose snow), with a probability above p_add (~0.1-0.2) | G, H, D (+ F into hairpins) |
+| any corner on loose ground that does not fall off (mud, sand, loose snow), with a probability above p_add (~0.1-0.2), on a road up to ~8 m wide; from 10 m its hairpins and tightest 90s only | G, H, D (+ F into hairpins) |
 | ice | G, H (no drift pays; H is the fallback) |
 | a steep downhill (> 5 %) on low friction | + D |
 | the drift corner under ~25 m ahead | no new D or F |
 
-Width: no rule until roadmap 061's width arm measures one.
+Width (roadmap 061 M3b's arm, 6-15 m): it decides the 90 deg corners on loose ground without
+fall-off (a drift pays 0.6-1.3 % at 6-8 m, 0.05-0.2 % at 10 m, nothing at 15 m) and leaves
+hairpins alone (every width pays); asphalt and gravel 90s never pay. So the drift map is keyed on
+width: a corner reads the widest measured width no wider than its road, the narrowest if its
+width is unknown. The table runs from that map (`schedule.py`, `drift_map.json`), applied to the
+corner the seeds go into.
 
 **Why loose in, strict out.** Leaving out D costs at most 0.4 % on asphalt, but on low friction
 1-2 % and the fallback; carrying it costs a core. So uncertain surface adds starts. Committing
@@ -429,4 +435,5 @@ proving ground or the first track, and never per corner.
 | any feasible start's plan when G fails | the extra starts' measured value is robustness, not lap time |
 | the surface from the map with a confidence; alerts only downgrade, the camera vetoes, the car's estimate only lowers and holds | no sensor sees 200-260 m ahead, none senses the fall-off; 060 M6's estimate rose mid-slide |
 | the planner's tyre peaks at each surface class's own slip; the schedule keyed on class, not on mu | swb's surface layer does (061 M2); on it drift-optimal low-friction cases fell from 53 to 32 of 80 and the gain depends on the class's fall-off, not its friction (ice: none) |
+| width keys the drift map (M3b's arm); H is the fallback, not a competitor; G alone is solved as 060's, in the driver's own process | narrow loose roads drift in 90 deg corners, wide ones do not, hairpins at every width; H weighed in the gate cost Tsukuba 0.55 %; a G-only re-plan is then 060's exactly (R6) |
 | solver levers: fewer iterations, then Fatrop, SQP on HPIPM, MUMPS tuning; no HSL, no GPU under the solver | user's ruling; the measured cost split; a GPU loses at ~1000 variables |

@@ -106,13 +106,16 @@ class MultiStart:
 
     def __init__(self, driver, threshold=THRESHOLD, confirm=CONFIRM, ahead=AHEAD, flick=False,
                  seed_budget=None, max_iter=400, cpus=None, library=True, schedule=None,
-                 perception=None):
+                 perception=None, h_competes=False):
         """schedule (roadmap 061 M3b): None, M3's fixed starts ({G, D}, F with `flick`, G in a
         process of its own); else the starts chosen per re-plan by a schedule.Scheduler built
         from this dict (its keyword arguments: table, a track.SurfaceTable, default swb's;
         dmap, smap, always, rules), G solved in the driver's own process as 060 solves it, H, D
         and F each in a process. perception: a surface.Perception that may veto a drift commit
-        and lower the planned friction near the car (scheduled only)."""
+        and lower the planned friction near the car (scheduled only). h_competes: H's plan
+        weighed by the gate like the others; by default (False) it is the fallback, adopted only
+        when no free start (G, D, F) has a feasible plan (M3b's chain check: as a competitor it
+        held the grip mode on a slower plan wherever the free G slid by itself, Tsukuba +0.55 %)."""
         d = driver
         self.car, self.track, self.grip = d.car, d.track, d.grip
         self.threshold, self.confirm, self.ahead = threshold, confirm, ahead
@@ -132,7 +135,7 @@ class MultiStart:
             held = sorted({held_bound(p) for p in self.peaks})
         else:
             self.slots = ("G", "D", "F") if flick else ("G", "D")
-        self.held = held
+        self.held, self.h_competes = held, h_competes
         kw = {"ds": d.ds, "length": d.length, "grip": d.grip, "max_iter": max_iter,
               "budget": SEED_SHARE * d.budget if seed_budget is None else seed_budget}
         ctx = mp.get_context("spawn")        # a fresh interpreter: no solver state forked
@@ -281,6 +284,9 @@ class MultiStart:
         docstring); None if no plan is feasible. rec, if given, is filled in."""
         rec = {} if rec is None else rec
         rec["mode_before"] = self.mode
+        if not getattr(self, "h_competes", True) and "H" in res and any(
+                r["ok"] for k, r in res.items() if k != "H"):
+            res = {k: r for k, r in res.items() if k != "H"}     # H: the fallback only
         best = {}
         for slot, r in res.items():
             if r["ok"] and (r["mode"] not in best or r["time"] < res[best[r["mode"]]]["time"]):
