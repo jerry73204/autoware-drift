@@ -66,12 +66,13 @@ ROWS = ("ax", "ay", "fz_fl", "fz_fr", "fz_rl", "fz_rr", "use_fl", "use_fr", "use
 NLP_FUNCTIONS = ("nlp", "nlp_f", "nlp_g", "nlp_grad_f", "nlp_jac_g", "nlp_grad", "nlp_hess_l")
 
 
-def _compiled_nlpsol(nlp, opts, own=None):
-    """IPOPT on nlp with its functions C-compiled (those in `own`, by their names, where given,
-    CasADi's own otherwise): generated once, compiled once per distinct code (cached by its hash
-    under CACHE), loaded; None without a compiler."""
+def _compiled_nlpsol(nlp, opts, own=None, plugin="ipopt"):
+    """IPOPT (or another of CasADi's solvers, `plugin`) on nlp with its functions C-compiled
+    (those in `own`, by their names, where given, CasADi's own otherwise): generated once,
+    compiled once per distinct code (cached by its hash under CACHE), loaded; None without a
+    compiler."""
     own = own or {}
-    probe = ca.nlpsol("l1", "ipopt", nlp, opts)
+    probe = ca.nlpsol("l1", "ipopt", nlp, opts if plugin == "ipopt" else {})
     d = tempfile.mkdtemp(prefix="race_planner_")
     cg = ca.CodeGenerator("l1_nlp.c", {"with_header": False})
     for name in NLP_FUNCTIONS:
@@ -81,12 +82,12 @@ def _compiled_nlpsol(nlp, opts, own=None):
     src = os.path.join(d, "l1_nlp.c")
     key = hashlib.sha1(open(src, "rb").read()).hexdigest()[:16]
     try:
-        return _load(src, key, opts)
+        return _load(src, key, opts, plugin)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _load(src, key, opts):
+def _load(src, key, opts, plugin="ipopt"):
     """The library for code `src` (compiled into CACHE unless there already), loaded."""
     os.makedirs(CACHE, exist_ok=True)
     lib = os.path.join(CACHE, f"l1_nlp_{key}.so")
@@ -98,7 +99,7 @@ def _load(src, key, opts):
         except (OSError, subprocess.CalledProcessError):
             return None
         os.replace(tmp, lib)
-    return ca.nlpsol("l1", "ipopt", lib, opts)
+    return ca.nlpsol("l1", plugin, lib, opts)
 
 
 def friction_scale(car, mu_map, mu_ratio, demand, grip=1.0):
@@ -373,6 +374,7 @@ class Window:
                            [T, ca.vertcat(ca.vec(gm), ca.DM.zeros(6)) + greg],
                            ["x", "p"], ["f", "grad_f_x"])
         own = {"nlp_hess_l": hess, "nlp_jac_g": jac, "nlp_grad_f": grad}
+        self.nlp, self.own = nlp, own            # the problem, for another solver's study
         self.solver = _compiled_nlpsol(nlp, opts, own) if compile else None
         if self.solver is None:
             self.solver = ca.nlpsol("l1", "ipopt", nlp, opts)

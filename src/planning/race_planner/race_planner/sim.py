@@ -159,3 +159,37 @@ class Plant:
                 self.psi += h * self.v[2]
             self.t += 1.0 / ECU_RATE
         return self.state()
+
+
+class NoTracker:
+    """A tracker for PlanFollower's car: it commands nothing (the car is on its plan)."""
+
+    def step(self, state, plan, plan_t0):
+        return {"accel": 0.0, "tire_angle": 0.0, "ok": True, "solve_s": 0.0, "fallback": False}
+
+
+class PlanFollower:
+    """No plant at all: the car on the plan its driver has adopted, exactly (roadmap 061 M3's
+    receding chain). It moves along the plan's own time and its state is the plan's where it is,
+    so what is measured is the re-planning alone. Drive it with a live.Driver given NoTracker."""
+
+    def __init__(self, driver, s0, v0):
+        self.d, self.t, self.s = driver, 0.0, s0
+        self.x = np.array([v0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    def state(self):
+        vx, vy, r, n, xi, delta = (float(v) for v in self.x)
+        return {"t": self.t, "s": self.s, "vx": vx, "vy": vy, "r": r, "n": n, "xi": xi,
+                "delta": delta}
+
+    def step(self, dt):
+        from race_planner.live import plan_at
+        p = self.d.plan
+        tp = float(np.interp(self.s, p["s"], p["t"]))
+        if tp + dt <= p["t"][-1]:
+            self.s = float(np.interp(tp + dt, p["t"], p["s"]))
+        else:
+            self.s += dt * max(float(self.x[0]), 1.0)
+        self.x, _, _ = plan_at(p, self.s)
+        self.t += dt
+        return self.state()

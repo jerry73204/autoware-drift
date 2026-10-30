@@ -49,6 +49,22 @@ def plan_at(plan, s):
     return X, a, t
 
 
+def warm_from(window, plan, i0, x0, track):
+    """The warm start for `window` from node i0 at state x0: `plan` shifted to it (window.warm,
+    the window's multipliers shifted with it) while it still covers enough of the window, else
+    the cold guess; the shifted plan starts where the plan is, the window where the car will
+    be: the difference eased out over the first nodes, so the warm start is near feasible."""
+    j = i0 - plan["i0"]
+    if j < 1 or j >= int((1 - 0.2) * window.N):
+        Xw, Uw = initial(window.section(track, i0), window.car, v_start=x0[0])
+        Xw[:, 0] = x0
+    else:
+        Xw, Uw = window.warm(plan, j, track)
+        k = min(BLEND, Xw.shape[1])
+        Xw[:, :k] += np.outer(x0 - Xw[:, 0], 1.0 - np.arange(k) / k)
+    return Xw, Uw
+
+
 class SimpleTracker:
     """Today's tracker (swb's course_probe PLAN mode), ported: the plan's steering ahead as
     feedforward with feedback on the offset, the heading and the yaw rate; the plan's request
@@ -94,6 +110,9 @@ class Driver:
     # the car's friction estimate (mu_ratio) used at all: off by default (roadmap 060 M6: it saved
     # 0.1 s on a x0.8 patch and made a x0.7 patch a crash, its scale back to the map's too soon)
     use_estimate: bool = False
+    # L1 from more than one start, grip or drift chosen live (roadmap 061 M3; multistart.py):
+    # None, the default, is one start (060's); a dict of MultiStart's options turns it on
+    multistart: dict = None
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -131,6 +150,15 @@ class Driver:
         self.stopping = None           # why the car is being stopped, once it is
         self.stop_law = SimpleTracker(self.car)
         self.plan_mu = 1.0             # the friction scale the current plan was made with
+        self.multi = None
+        if self.multistart is not None:
+            from race_planner.multistart import MultiStart
+            self.multi = MultiStart(self, **self.multistart)
+
+    def close(self):
+        """The seed processes stopped (multistart only)."""
+        if self.multi is not None:
+            self.multi.close()
 
     def v_end(self, i0):
         s_end = self.track.s[min(i0 + self.warm.N - 1, len(self.track.s) - 1)]
@@ -155,6 +183,9 @@ class Driver:
         if not plan["ok"]:
             raise RuntimeError(f"no first plan: {plan['status']}")
         self.plan, self.plan_t0, self.plan_mu = plan, state["t"], self.plan_mu_next
+        if self.multi is not None:       # the seeds warm-start from it, its multipliers with it
+            plan["lam"], plan["lam_x"] = self.cold.lam, self.cold.lam_x
+            self.multi.classify(plan, i0, None)
         self.next_replan = state["t"] + REPLAN_PERIOD
         # the warm solver is built on its first call: do it now, off the clock
         self._replan(state, adopt_now=True)
@@ -236,23 +267,18 @@ class Driver:
         lead_t = 0.0 if adopt_now else self.budget
         s0, x0 = (state["s"], self.x_of(state)) if adopt_now else self.predict(state, lead_t)
         i0 = self.node(s0)
-        j = i0 - self.plan["i0"]
-        if j < 1 or j >= int((1 - 0.2) * self.warm.N):
-            Xw, Uw = initial(self.warm.section(self.track, i0), self.car, v_start=x0[0])
-            Xw[:, 0] = x0
-        else:
-            Xw, Uw = self.warm.warm(self.plan, j, self.track)
-            # the shifted plan starts where the plan is, the window where the car will be: the
-            # difference eased out over the first nodes, so the warm start is near feasible
-            k = min(BLEND, Xw.shape[1])
-            Xw[:, :k] += np.outer(x0 - Xw[:, 0], 1.0 - np.arange(k) / k)
-        new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw,
-                              mu_scale=self.mu_ahead(state, i0))
+        mu = self.mu_ahead(state, i0)
+        if self.multi is None:
+            Xw, Uw = warm_from(self.warm, self.plan, i0, x0, self.track)
+            new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw, mu_scale=mu)
+            wall = new["solve_s"]
+        else:                            # every seed at once; the wall time is the slowest's
+            new, wall = self.multi.replan(self, i0, x0, self.v_end(i0), mu)
         self.solves.append({"t": state["t"], "s": state["s"], "ok": new["ok"],
-                            "iters": new["iters"], "solve_s": new["solve_s"],
+                            "iters": new["iters"], "solve_s": wall,
                             "status": new["status"]})
         # adopted at the latency the plan was made for (or later, if the solve overran it)
-        ready = state["t"] + (0.0 if adopt_now else max(lead_t, new["solve_s"]))
+        ready = state["t"] + (0.0 if adopt_now else max(lead_t, wall))
         self.busy_until = ready        # one solver: the next solve starts after this one ends
         if new["ok"]:
             self.pending = (ready, new, self.plan_mu_next)

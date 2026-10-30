@@ -29,7 +29,8 @@ csv and npz), then `report` (the figures beside docs/drift-optimality.md) and `d
 Multistart (roadmap 061 M1, docs/mode-choice-m1.md): grids multistart (the study's settings;
 first), multistart-live, multistart-live-warm (the live window, one budgeted solve a start)
 and e0b (the live grid on MUMPS and on SPRAL), results under MS_OUT as jsonl and npz; then
-`multistart-report`.
+`multistart-report`; `library` builds race_planner/corner_library.npz (the live loop's corner
+archetypes, roadmap 061 M3) from the multistart grid.
 """
 import argparse
 import csv
@@ -48,6 +49,9 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 from race_planner.car import Car  # noqa: E402
 from race_planner.track import Track  # noqa: E402
+from race_planner.modes import (D_BRAKE, D_FROM, FLICK_PAST, SEED_PAST,  # noqa: E402,F401
+                                _consistent_u, _zone, reshape_slip, seed_flick,
+                                seed_rear_out)
 
 SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
 SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
@@ -111,13 +115,8 @@ def rear_peak(mu, sliding, car=None):
     transfer at mu g): the smallest angle at which its lateral force is within 0.5 % of its
     largest. PhysX's brush saturates at tan = 3 mu Fz / C, so it scales with mu (2.9 deg at 0.3,
     15 deg at 1.12 with no fall-off); swb's fall-off starts at the rig's 8.6 deg."""
-    from race_planner import model
-    car = car or make_car()
-    fz0 = model.rest_loads(car)[2]
-    fz = (1.0 + 0.6 * mu) * fz0
-    a = np.radians(np.linspace(0.05, 40.0, 800))
-    fy = np.array([-float(model.tyre(car, 0.0, math.tan(x), fz, fz0, mu, sliding)[1]) for x in a])
-    return float(a[int(np.argmax(fy >= 0.995 * fy.max()))])
+    from race_planner import modes
+    return modes.rear_peak(car or make_car(), mu, sliding)
 
 
 def hold_kwargs(hold, mu, sliding):
@@ -371,10 +370,6 @@ SETTINGS = {
                   "warm": True},
 }
 LIVE_TIMED = 220.0                 # m: a live window's time read at most here, 40 m short of its end
-SEED_PAST = math.radians(7.5)      # the rear-out seeds' rear axle past its tyre's peak
-FLICK_PAST = math.radians(5.0)     # the flick's first slide, the other way
-D_FROM = 25.0                      # m before turn-in the rear-out seed starts sliding
-D_BRAKE = -0.3                     # m/s^2: its request on low friction (mu < 0.7); 0 above
 CONT_STEPS = (1.0, 0.9, 0.8, 0.7, 0.6)
 SEEDS = ("C", "G", "Ds", "Dc", "F", "P1", "P2", "P3")
 _MS_WINDOWS = {}
@@ -397,90 +392,6 @@ def ms_window(setting, held=None, linsol="mumps", budget=True):
                                        budget=o["budget"] if budget else None, ipopt=ipopt,
                                        **(held or {}))
     return _MS_WINDOWS[key]
-
-
-def _zone(s, a, b, ramp_in, ramp_out):
-    """1 on [a, b], ramped linearly to 0 over ramp_in before and ramp_out after."""
-    return np.clip(np.minimum((s - (a - ramp_in)) / ramp_in, ((b + ramp_out) - s) / ramp_out),
-                   0.0, 1.0)
-
-
-def _consistent_u(X, U, t, car, w=None, a_req=None):
-    """U (7 x M) made to match states X: the steering rate from delta, the turn's acceleration,
-    and where w > 0 the request blended to a_req and the wheels' speeds for it (wheel_speeds)."""
-    from race_planner.window import wheel_speeds
-    M = X.shape[1] - 1
-    s = t.s[:X.shape[1]]
-    U = np.array(U, float).copy()
-    rate = car.steer_rate_max or 1.0
-    U[0] = np.clip(np.gradient(X[5], s)[:M] * X[0, :M], -rate, rate)
-    U[3] = X[0, :M] * X[2, :M]
-    if w is not None:
-        wm = w[:M]
-        if a_req is not None:
-            U[1] = (1 - wm) * U[1] + wm * a_req
-            U[2] = (1 - wm) * U[2] + wm * a_req
-        ws = wheel_speeds(car, X[:, :M], U[1])
-        U[4:7] = (1 - wm) * U[4:7] + wm * ws
-    return U
-
-
-def reshape_slip(X, U, t, car, target, w, a_req=None):
-    """A seed from plan (X, U): the body turned so that the rear axle's slip angle is `target`
-    (rad, per node) where w is 1, blended where 0 < w < 1, untouched where w is 0. The path and
-    the speed are kept (the velocity's heading to the track, xi + beta, and |v|); the heading xi
-    gives way to the new sideslip, the yaw rate follows from it (sdot (dxi/ds + kappa)), and the
-    steering keeps the front axle's slip angle the plan had. The request goes to a_req in the
-    zone (None: kept)."""
-    N = X.shape[1]
-    s, kap = t.s[:N], t.kappa[:N]
-    vx, vy, r, n, xi, delta = (np.array(X[i], float) for i in range(6))
-    v = np.hypot(vx, vy)
-    beta0 = np.arctan2(vy, vx)
-    chi = xi + beta0
-    front0 = np.arctan2(vy + car.lf * r, vx) - delta
-    ar0 = np.arctan2(vy - car.lr * r, vx)
-    goal = ar0 + w * (target - ar0)
-    beta = beta0.copy()
-    on = w > 0
-    for _ in range(60):
-        xin = chi - beta
-        sdot = v * np.cos(chi) / (1 - n * kap)
-        rn = sdot * (np.gradient(xin, s) + kap)
-        ar = np.arctan2(v * np.sin(beta) - car.lr * rn, v * np.cos(beta))
-        beta = np.where(on, np.clip(beta + 0.4 * (goal - ar), -0.9, 0.9), beta0)
-    xin = chi - beta
-    rn = np.where(on, v * np.cos(chi) / (1 - n * kap) * (np.gradient(xin, s) + kap), r)
-    vxn, vyn = v * np.cos(beta), v * np.sin(beta)
-    dn = np.clip(np.arctan2(vyn + car.lf * rn, vxn) - front0, -car.steer_max, car.steer_max)
-    dn = np.where(on, dn, delta)
-    Xn = np.vstack([vxn, vyn, rn, n, np.where(on, xin, xi), dn])
-    Xn[:, 0] = X[:, 0]
-    return Xn, _consistent_u(Xn, U, t, car, w, a_req)
-
-
-def seed_rear_out(X, U, t, s_in, s_out, car, peak, mu):
-    """Ds: the rear SEED_PAST past its peak from D_FROM before turn-in to the apex (ramped in
-    over 5 m, out over 10), braking on low friction, coasting on asphalt."""
-    s = t.s[:X.shape[1]]
-    sgn = np.sign(t.kappa.sum()) or 1.0
-    apex = 0.5 * (s_in + s_out)
-    w = _zone(s, s_in - D_FROM, apex, 5.0, 10.0)
-    target = -sgn * (peak + SEED_PAST) * np.ones_like(s)
-    return reshape_slip(X, U, t, car, target, w, D_BRAKE if mu < 0.7 else 0.0)
-
-
-def seed_flick(X, U, t, s_in, s_out, car, peak, mu):
-    """F: the rear out the other way first (FLICK_PAST past the peak, 35 to 18 m before
-    turn-in), then as Ds from 10 m before turn-in to the apex."""
-    s = t.s[:X.shape[1]]
-    sgn = np.sign(t.kappa.sum()) or 1.0
-    apex = 0.5 * (s_in + s_out)
-    w1 = _zone(s, s_in - 35.0, s_in - 18.0, 4.0, 4.0)
-    w2 = _zone(s, s_in - 10.0, apex, 4.0, 10.0)
-    target = np.where(w1 > w2, sgn * (peak + FLICK_PAST), -sgn * (peak + SEED_PAST))
-    return reshape_slip(X, U, t, car, target, np.maximum(w1, w2),
-                        D_BRAKE if mu < 0.7 else 0.0)
 
 
 def seed_perturbed(X, U, t, car, k):
@@ -1165,6 +1076,10 @@ def main():
         return deep_report()
     if sys.argv[1:] == ["multistart-report"]:
         return ms_report()
+    if sys.argv[1:] == ["library"]:                  # race_planner/corner_library.npz (M3)
+        from race_planner import modes
+        bounds = lambda R, th: (L_IN, L_IN + RAMP + th * R)
+        return print(modes.build_library(MS_OUT, make_car(), bounds), "archetypes")
     ap = argparse.ArgumentParser()
     ap.add_argument("grid")
     ap.add_argument("--jobs", type=int, default=6)

@@ -5,7 +5,9 @@ tick, as a ROS node will later be driven over topics.
     python -m race_planner.serve
 
 First line in: {"init": {"map_dir": ..., "spec": ..., "classes": ..., "l0": <npz or null>,
-    "ds": 4.0, "length": 200.0, "grip": 0.92, "budget": 1.0, "laps": 3}}  (laps: a circuit's)
+    "ds": 4.0, "length": 200.0, "grip": 0.92, "budget": 1.0, "laps": 3,
+    "multistart": null}}  (laps: a circuit's; multistart: live.Driver's, null for one start, or
+    MultiStart's options, e.g. {"flick": true, "cpus": [8, 9, 10]}: grip or drift chosen live)
   out: {"ready": true, "s0": <the track's first s>}
 Then per tick in: {"state": {"t", "x", "y", "yaw", "vx", "vy", "r", "delta"}} (map frame, the
   CoM; vx, vy in the body frame; yaw the body's)
@@ -74,7 +76,8 @@ def main():
     driver = live.Driver(car, track, Tracker(car, track), l0=l0,
                          ds=float(init.get("ds", 4.0)), length=float(init.get("length", 200.0)),
                          grip=float(init.get("grip", 0.92)), budget=float(init.get("budget", 1.0)),
-                         use_estimate=bool(init.get("friction_estimate", False)))
+                         use_estimate=bool(init.get("friction_estimate", False)),
+                         multistart=init.get("multistart"))
     frenet = Frenet(track, None if lap is None else int(lap / float(track.s[1] - track.s[0])))
     _out({"ready": True, "s0": float(track.s[0])})
     started = False
@@ -97,7 +100,10 @@ def main():
               "xi": xi, "n_plan": last["n_plan"], "v_plan": last["v_plan"], "stop": last["stopping"],
               "beta_plan_deg": last["beta_plan_deg"],
               "solve_s": driver.solves[-1]["solve_s"] if driver.solves else 0.0})
+    driver.close()
     summary = {"solves": len(driver.solves), "solves_ok": sum(x["ok"] for x in driver.solves)}
+    if driver.multi is not None:
+        summary["mode_changes"] = sum(r["mode"] != r["mode_before"] for r in driver.multi.records)
     _out({"done": True, **summary})
 
 
