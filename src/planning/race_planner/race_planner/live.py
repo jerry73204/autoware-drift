@@ -29,6 +29,7 @@ ENVELOPE_LAT, ENVELOPE_BETA, ENVELOPE_SPEED = 0.5, math.radians(5.0), 2.0
 # keeps (grip 0.92), so a plan is replaced once the car has found less than it left for L2
 ENVELOPE_MU = 0.08
 MU_BETA = math.radians(2.5)    # the car's sideslip past the plan's that says it is at the limit
+SLIDE_BETA = math.radians(5.0)  # the car's sideslip that holds the estimate (FrictionEstimate)
 REPLAN_PERIOD = 1.0
 # the car stops (L2's safety layer, design 4.3): after this many failed solves in a row, past this
 # sideslip (a spin), or within this distance of the plan's end with no newer plan
@@ -113,6 +114,10 @@ class Driver:
     # L1 from more than one start, grip or drift chosen live (roadmap 061 M3; multistart.py):
     # None, the default, is one start (060's); a dict of MultiStart's options turns it on
     multistart: dict = None
+    # the car's estimate as the planner uses it with use_estimate (roadmap 061 M3b): None, 060's
+    # (the reading itself, back to 1 as soon as the car is on its plan's sideslip); or a
+    # surface.FrictionEstimate: only lowers, held through a slide, released slowly after
+    estimator: object = None
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -205,9 +210,16 @@ class Driver:
         # (Haruna s 204), in the patch 0.67-0.72 against 0.83 with the car sliding 1.5-5 deg more
         X, _, _ = plan_at(self.plan, state["s"])
         beta = math.atan2(state["vy"], max(state["vx"], 0.5))
-        if abs(beta) - abs(math.atan2(X[1], max(X[0], 0.5))) < MU_BETA:
-            return 1.0
-        return friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip)
+        excess = abs(beta) - abs(math.atan2(X[1], max(X[0], 0.5)))
+        if self.estimator is None:
+            if excess < MU_BETA:
+                return 1.0
+            return friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip)
+        raw = (None if excess < MU_BETA else
+               friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip))
+        return self.estimator.update(state["t"], raw,
+                                     sliding=excess >= MU_BETA or abs(beta) >= SLIDE_BETA,
+                                     s=state["s"], mu_map=mu_map)
 
     def plan_left(self, state):
         """How far the current plan reaches ahead of the car, m."""

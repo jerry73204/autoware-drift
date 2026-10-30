@@ -75,7 +75,7 @@ BETA_HOLD = math.radians(2.0)
 REAR_PAST = 3.0      # deg: a free plan's rear axle this far past its tyre's peak slides
 
 
-def section(R, theta, mu, sliding, grade=0.0, ds=DS, surface=None):
+def section(R, theta, mu, sliding, grade=0.0, ds=DS, surface=None, half_width=HALF_WIDTH):
     """The track: L_IN straight, a ramp up to 1 / R, the arc, a ramp down, the rest straight
     (left turn), on a grid of ds, its tyre `surface` (model.tyre's; None the rig's). The arc's
     length is what makes the whole turn theta. Returns (track, s_in, s_out): where the corner's
@@ -90,8 +90,8 @@ def section(R, theta, mu, sliding, grade=0.0, ds=DS, surface=None):
     x = np.concatenate([[0.0], np.cumsum(0.5 * (np.cos(psi[1:]) + np.cos(psi[:-1])) * ds)])
     y = np.concatenate([[0.0], np.cumsum(0.5 * (np.sin(psi[1:]) + np.sin(psi[:-1])) * ds)])
     one = np.ones_like(s)
-    t = Track(s=s, x=x, y=y, z=-grade * s, psi=psi, kappa=k, w_left=HALF_WIDTH * one,
-              w_right=HALF_WIDTH * one, mu=mu * one, closed=False, sliding=sliding * one,
+    t = Track(s=s, x=x, y=y, z=-grade * s, psi=psi, kappa=k, w_left=half_width * one,
+              w_right=half_width * one, mu=mu * one, closed=False, sliding=sliding * one,
               grade=-grade * one,
               **({} if surface is None else {k: v * one for k, v in zip(TYRE_FIELDS, surface)}))
     return t, s1, s4
@@ -177,13 +177,15 @@ def _clip_slip(X, held, car):
 
 
 def l1_case(arm, R, theta, mu, sliding, grade=0.0, power=1.0, hold="beta", regen=1.0,
-            surface=None, label=""):
+            surface=None, label="", half_width=HALF_WIDTH):
     """Free and held solves of one case on L1, each from two warm starts: the cold one (the
     minimum-curvature line, window.initial) and the other solve's result; the best of each kept,
     the spread of each over its starts reported as its noise. surface: the road's tyre
-    (model.tyre's; None the rig's), label: its name in the results (a class, M2)."""
+    (model.tyre's; None the rig's), label: its name in the results (a class, M2); half_width:
+    the road's either side of the centre line (M3b's width arm)."""
     from race_planner.window import initial
-    t, s_in, s_out = section(R, theta, mu, sliding, grade, surface=surface)
+    t, s_in, s_out = section(R, theta, mu, sliding, grade, surface=surface,
+                             half_width=half_width)
     v0 = v_start(R, mu)
     held = hold_kwargs(hold, mu, sliding, surface)
     wf, wh = window(arm, None, power, regen), window(arm, held, power, regen)
@@ -197,7 +199,7 @@ def l1_case(arm, R, theta, mu, sliding, grade=0.0, power=1.0, hold="beta", regen
     bound = math.degrees(held.get("beta_max", held.get("rear_alpha_max")))
     return summarise(t, s_in, s_out, free, hp, arm=arm, R=R, theta=theta, mu=mu,
                      sliding=sliding, grade=grade, power=power, diff="locked", v0=v0,
-                     hold=hold, bound=bound, regen=regen, surface=label,
+                     hold=hold, bound=bound, regen=regen, surface=label, width=2 * half_width,
                      rear_peak=math.degrees(rear_peak(mu, sliding, None, surface)))
 
 
@@ -243,7 +245,7 @@ def _from_l0(r):
 
 # ---- what a plan does in the corner ----
 
-def corner_metrics(p, t, s_in, s_out, held_car=None):
+def corner_metrics(p, t, s_in, s_out, held_car=None, half_width=HALF_WIDTH):
     """In the corner (its ramps' start to 20 m past their end): the largest |sideslip| (deg),
     the rear axle's largest |slip angle| (deg) and its sign against the turn's, whether the
     front wheels countersteer (steer against the turn's sense while turning), the slowest
@@ -259,7 +261,7 @@ def corner_metrics(p, t, s_in, s_out, held_car=None):
     sgn = np.sign(t.kappa[sel].sum()) or 1.0
     counter = np.any((delta[sel] * sgn < -math.radians(0.5)) & (r[sel] * sgn > 0))
     i_b = int(np.argmax(np.abs(beta[sel])))
-    edge = max(0.0, float(np.max(np.abs(n) - (HALF_WIDTH - 0.5 * car.width - 0.3))))
+    edge = max(0.0, float(np.max(np.abs(n) - (half_width - 0.5 * car.width - 0.3))))
     return {"beta_max": float(np.abs(beta[sel]).max()), "beta_at": float(s[sel][i_b]),
             "beta_sign": float(np.sign(beta[sel][i_b]) * sgn),
             "rear_alpha_max": float(np.abs(a_r[sel]).max()),
@@ -271,7 +273,7 @@ def corner_metrics(p, t, s_in, s_out, held_car=None):
 def summarise(t, s_in, s_out, free, held, **case):
     car = make_car(case["diff"], case["power"], case.get("regen", 1.0))
     for p in free + held:
-        p.update(corner_metrics(p, t, s_in, s_out, car))
+        p.update(corner_metrics(p, t, s_in, s_out, car, 0.5 * case.get("width", 2 * HALF_WIDTH)))
     gf, gh = [p for p in free if good(p)], [p for p in held if good(p)]
     row = dict(case)
     row.update(free_ok=len(gf), free_n=len(free), held_ok=len(gh), held_n=len(held),
@@ -311,6 +313,9 @@ M2_CLASSES = ("snow_packed", "snow_loose", "ice", "mud_wet", "sand", "grass", "g
 SLIDINGS = (1.0, 0.8, 0.6)
 RADII = (9.0, 15.0, 25.0, 40.0, 60.0)
 THETAS = (math.pi / 2, math.pi)
+# M3b's width arm: the road's whole width (m) on the corners where a drift pays after M2
+WIDTHS = (6.0, 8.0, 10.0, 15.0)
+W_CLASSES = ("asphalt", "mud_wet", "snow_loose", "gravel")
 
 
 def grid(name):
@@ -355,6 +360,13 @@ def grid(name):
             mu, sl = tab.mu(cls, car), tab.sliding(cls)
             for R, th in itertools.product(RADII, THETAS):
                 yield ("l1", ("l1", R, th, mu, sl, 0.0, 1.0, "rear", 1.0, sf, cls))
+    elif name == "m3b-width":                     # M3b: does the road's width move a drift?
+        car, tab = make_car(), SurfaceTable.from_yaml(CLASSES)
+        for cls in W_CLASSES:
+            sf, mu, sl = tab.tyre(cls, car), tab.mu(cls, car), tab.sliding(cls)
+            sf = None if sf == (1.0, 1.0, 1.0, 1.0) else sf
+            for w, R, th in itertools.product(WIDTHS, (9.0, 15.0, 25.0), THETAS):
+                yield ("l1", ("l1", R, th, mu, sl, 0.0, 1.0, "rear", 1.0, sf, cls, 0.5 * w))
     else:
         raise SystemExit(f"no grid {name}")
 
@@ -988,6 +1000,74 @@ def m2_report():
         f.write(text + "\n")
 
 
+def drift_map():
+    """race_planner/drift_map.json, the scheduler's (roadmap 061 M3b): per surface class the
+    cells (R, turn, gain %, width m) where a drift was optimal after M2 (drift_rear: the free
+    plan's rear axle 3 deg or more past its peak and the held plan slower beyond the noise):
+    asphalt from the rear grid (mu 1.12, sliding 0.8: swb's asphalt), the other classes from
+    m2-classes (8 m), the width arm's classes from m3b-width at every width it ran. A class with
+    no such cell is listed empty (ice: no drift pays), so it is not 'unknown'."""
+    from race_planner.schedule import DriftMap
+    cells = {}
+    for r in _rows("rear"):
+        if float(r["mu"]) == 1.12 and float(r["sliding"]) == 0.8:
+            cells.setdefault("asphalt", [])
+            if r.get("drift_rear") == "True":
+                cells["asphalt"].append([float(r["R"]), float(r["theta"]), _num(r, "dt_pct")])
+    for r in _rows("m2-classes"):
+        cells.setdefault(r["surface"], [])
+        if r.get("drift_rear") == "True":
+            cells[r["surface"]].append([float(r["R"]), float(r["theta"]), _num(r, "dt_pct")])
+    # the width arm (M3b) replaces its classes' cells: every width it ran
+    wide = [r for r in _rows("m3b-width") if not r.get("error")]
+    widths = {}
+    for c in {r["surface"] for r in wide}:
+        ran = {float(r["R"]) for r in wide if r["surface"] == c}
+        widths[c] = sorted({float(r["width"]) for r in wide if r["surface"] == c})
+        # radii the arm did not run (40, 60 m) keep their 8 m cells, at every width
+        cells[c] = [x + [w] for x in cells.get(c, []) if x[0] not in ran for w in widths[c]]
+    for r in wide:
+        if r.get("drift_rear") == "True":
+            cells[r["surface"]].append([float(r["R"]), float(r["theta"]), _num(r, "dt_pct"),
+                                        float(r["width"])])
+    for v in cells.values():
+        for x in v:
+            if len(x) == 3:
+                x.append(2 * HALF_WIDTH)
+    m = DriftMap(cells, {"concrete": "asphalt", "mud_soft": "mud_wet", "sand_loose": "sand"},
+                 widths=widths)
+    m.save(note="roadmap 061 M3b: built by studies/drift_optimality.py drift-map from the drift "
+                "study's rear (asphalt), m2-classes and m3b-width grids")
+    for c, v in cells.items():
+        print(c, [(R, round(math.degrees(t)), round(g, 2), w) for R, t, g, w in v])
+
+
+def width_report():
+    """M3b's width arm (m3b-width.csv): per class, radius and turn, the drift's gain (% of the
+    section's time) and how far its rear axle runs past the peak (deg) at each road width."""
+    rows = [r for r in _rows("m3b-width") if not r.get("error")]
+    lines = ["# 061 M3b: does the road's width move the drift optimum?", "",
+             "Each cell: gain % (rear axle past its peak, deg); bold where a drift is optimal "
+             "(drift_rear). Widths in metres, the whole road.", ""]
+    head = "| class | R | turn | " + " | ".join(f"{w:g} m" for w in WIDTHS) + " |"
+    lines += [head, "|---|---|---|" + "---|" * len(WIDTHS)]
+    key = lambda r: (r["surface"], float(r["R"]), float(r["theta"]))
+    for k in sorted({key(r) for r in rows}, key=lambda k: (W_CLASSES.index(k[0]), k[2], k[1])):
+        cells = []
+        for w in WIDTHS:
+            r = next((x for x in rows if key(x) == k and float(x["width"]) == w), None)
+            if r is None or not r.get("dt"):
+                cells.append("-")
+                continue
+            c = f"{_num(r, 'dt_pct'):.2f} ({_num(r, 'rear_past'):+.1f})"
+            cells.append(f"**{c}**" if r.get("drift_rear") == "True" else c)
+        lines.append(f"| {k[0]} | {k[1]:g} | {math.degrees(k[2]):.0f} | " + " | ".join(cells) + " |")
+    text = "\n".join(lines)
+    print(text)
+    with open(os.path.join(OUT, "m3b_width.md"), "w") as f:
+        f.write(text + "\n")
+
+
 def run(job):
     kind, args = job
     c = time.time()
@@ -999,7 +1079,7 @@ def run(job):
     return row, keep
 
 
-FIELDS = ("surface", "arm", "hold", "regen", "bound", "rear_peak", "rear_past", "drift_rear", "noise",
+FIELDS = ("surface", "width", "arm", "hold", "regen", "bound", "rear_peak", "rear_past", "drift_rear", "noise",
           "diff", "R", "theta", "mu", "sliding", "grade", "power", "v0", "free_ok",
           "free_n", "held_ok", "held_n", "free_status", "held_status", "t_free", "t_held", "dt",
           "dt_pct", "noise_free", "noise_held", "beta_free", "beta_sign", "rear_alpha_free",
@@ -1183,6 +1263,10 @@ def main():
         return ms_report()
     if sys.argv[1:] == ["m2-report"]:
         return m2_report()
+    if sys.argv[1:] == ["drift-map"]:                # race_planner/drift_map.json (M3b)
+        return drift_map()
+    if sys.argv[1:] == ["m3b-width-report"]:
+        return width_report()
     if sys.argv[1:] == ["library"]:                  # race_planner/corner_library.npz (M3)
         from race_planner import modes
         bounds = lambda R, th: (L_IN, L_IN + RAMP + th * R)
@@ -1204,7 +1288,8 @@ def main():
         w = csv.DictWriter(f, FIELDS, extrasaction="ignore")
         w.writeheader()
         # chunks of ten share a held window (one surface's radii and angles: one compile)
-        chunk = 10 if a.grid == "rear" or a.grid.startswith("m2-") else 1
+        chunk = (24 if a.grid == "m3b-width" else
+                 10 if a.grid == "rear" or a.grid.startswith("m2-") else 1)
         for i, (row, keep) in enumerate(ex.map(run, jobs, chunksize=chunk)):
             row = {k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()}
             w.writerow(row)
