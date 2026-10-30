@@ -1,6 +1,8 @@
 # A live race planner and tracker (revises the minimum-time planner's method 5)
 
-Date: 2026-10-29. Status: **proposal, revision 2**, for the user's review. The user decided the
+Date: 2026-10-29. Status: **revision 3** (2026-10-30): built and driven in roadmap 060;
+revision 3 (section 4.4a, listed in section 10) replaces "several warm starts" with starts
+chosen from what lies ahead, from roadmap 061's measurements. The user decided the
 shape ("a live planning/tracking system that runs in real time: seconds to compute a
 medium-range plan, and another part to update the route and the control when the vehicle
 drifts"); everything else is *ours*, argued below, and open to change. It revises
@@ -222,18 +224,18 @@ costs time. The track margin comes from the map's edge type (guardrail, terrain,
 which the course generator already knows, not from any corner's name. Today's 0.3 m everywhere
 put the inner wheels on the grass at Haruna's apexes.
 
-**Revision: several warm starts, because a slide is a choice.** Grip and drift through a
-corner are different local optima; a solver warm-started from the last plan stays in the
-mode it started in and never discovers the other. L1 solves from two or three starts in
-parallel (the last plan shifted; the grip line from L0 or `qss.py`; a drift seed from the
-steady drift states `steady.py` computes) and keeps the fastest feasible result. This is what
-"drift only where it is faster" needs online; the cores are there (32).
+**Revision: several starts, because a slide is a choice.** Grip and drift through a corner
+are different local optima; a solver warm-started from the last plan stays in the mode it
+started in and never discovers the other. Revision 3 decides which starts, when, and how one
+is chosen: section 4.4a.
 
-**How it meets its budget.** Warm start from the last plan shifted by the distance driven; a
-coarser grid (ds 2-4 m); an iteration cap that returns the best feasible iterate. **This is the
-main risk**: a cold 400 m solve takes 200 s today; whether a warm 200 m window converges in
-about a second must be measured first (milestone 1). Fallbacks, in order: a shorter window, a
-single-track model with load transfer, acados' SQP in the spatial domain.
+**How it meets its budget.** Warm start from the last plan shifted by the distance driven; ds
+4 m; IPOPT's wall-time cut. Measured (060, the live model): p50 0.27 s, p95 0.91 s, p99 1.04 s,
+5.9 ms an iteration (the linear solve 57 %, the model's derivatives 34 %, IPOPT 9 %). Levers
+if it is short, in order (user, 2026-10-30: HSL skipped, free alternatives first): fewer
+iterations (each start keeps its own plan), Fatrop (in CasADi; 35-44 % faster at p95 but 17 % of
+its plans differ beyond the noise, so not adopted yet), CasADi's SQP on HPIPM, MUMPS tuning. A
+GPU does not help a solve this size (roadmap 061).
 
 **When it re-solves.** On a 1 s timer, and at once when the car leaves the plan's envelope
 (lateral error > 0.5 m, sideslip off by > 5 deg, speed off by > 2 m/s: set once on the proving
@@ -243,6 +245,84 @@ ground, not per track).
 solve start + budget, and stamps the plan with that time; L2 switches at its first tick after it,
 without blending. L2 follows the plan by s (contouring), so a switch moves the reference, not
 the steering, and its input-rate cost smooths the rest.
+
+### 4.4a L1's starts: chosen from what lies ahead (revision 3)
+
+**What was measured** (roadmap 061; autoware-drift `drift-optimality.md`,
+`mode-choice-m1.md`, `mode-choice-m3.md`, `mode-choice-methods.md`, `preconditions.md`):
+- a drift is the optimum only in tight hairpins on asphalt (at most 0.4 %, an earlier
+  rotation, not more speed), and, on the planner's tyre per surface class (061 M2), in every
+  corner on loose ground that keeps its grip past the peak (mud, sand, loose snow: ~1.2 %) and
+  in hairpins on other loose ground and packed snow (0.3-0.6 %); never on ice;
+- the right starts reach it (offline 100 %), the 1 s budget cuts them (live 73-87 %);
+- choosing between them gained no lap time in the receding loop (the gate decided 3 times in
+  18 runs): the extra starts' value is robustness, a plan when the grip start fails (18 % of
+  re-plans at mu 0.3; the single start stopped the car, multi-start never did);
+- nothing on the car sees friction 200-260 m ahead (cameras to ~30 m, slip estimators 0 m), and
+  nothing senses the fall-off past the peak: over the window the surface is the map's.
+
+**Why choose the starts before the solver.** A gradient sees only the slope where it stands;
+grip and drift are valleys with a slower half-slide ridge between them. Racing stacks make such
+discrete choices before the solver, never inside it (overtaking side, homotopy class); a
+sampler's weighted mean lands on the ridge; mixed-integer is too slow for 1 Hz. So a cheap rule
+on the window ahead decides which starts run, and the derivative solver refines each.
+
+**The re-plan, step by step:**
+
+```
+ map (zones: class + confidence; geometry, grade, width)
+ off-board alerts (only downgrade)  camera 0-30/60 m (confirm, veto)  ECU estimate (only lowers)
+        │
+        ▼
+ 1. read the window ── corners (turn, least R, distance ahead); per node class probabilities
+        │              -> mu at a lower quantile, fall-off; grade; width
+        ▼
+ 2. schedule starts ── G always; H, D where a drift can pay or a fallback is needed; F rarely
+        ▼
+ 3. solve in parallel ─ one core each, each cut at ~0.9 s, each warm from its own last plan
+        ▼
+ 4. choose ─────────── feasible only; switch mode only if > 0.3 % faster on two re-plans,
+        │              grip on a tie, camera veto; G failed: any feasible plan
+        ▼
+ 5. adopt (4.4 hand-over) -> L2 -> ECU;  all failed past the stopping distance -> stop (5)
+        ▼
+ 6. after a pass ───── the car's estimate corrects the map for the next lap
+```
+
+**The starts.** G: the last adopted plan shifted (060's only start). H: grip held at the rear
+tyre's peak slip angle (`rear_alpha_max`), so a grip plan always exists to weigh a slide
+against (a free G slides by itself on low friction). D: rear out at turn-in, from its own last
+plan, else the nearest corner archetype in `corner_library.npz` (solved offline by fall-off
+continuation), else a synthetic profile. F: a pendulum flick.
+
+**The schedule** (thresholds from the drift-optimality map, never per track):
+
+| the window ahead holds | starts |
+|---|---|
+| dry asphalt, no corner past ~120 deg tighter than R 25 m | G (as 060) |
+| a dry asphalt hairpin (>= 150 deg, R <= 25 m) | G, H, D |
+| the same at R <= 9 m on a surface without fall-off | + F |
+| a hairpin (R <= 25 m) on loose ground falling off past the peak (gravel, dirt, grass) or packed snow | G, H, D |
+| any corner on loose ground that does not fall off (mud, sand, loose snow), with a probability above p_add (~0.1-0.2) | G, H, D (+ F into hairpins) |
+| ice | G, H (no drift pays; H is the fallback) |
+| a steep downhill (> 5 %) on low friction | + D |
+| the drift corner under ~25 m ahead | no new D or F |
+
+Width: no rule until roadmap 061's width arm measures one.
+
+**Why loose in, strict out.** Leaving out D costs at most 0.4 % on asphalt, but on low friction
+1-2 % and the fallback; carrying it costs a core. So uncertain surface adds starts. Committing
+to a drift on a gain the size of the noise costs more in tracking than it gains, so the switch
+is strict, and a drift plan must still win when both are scored at the lower friction quantile.
+This is motorsport's split: options kept open on a cheap prior (rally's tyres, hours ahead),
+committed on a measured crossover (F1's lap-time rule).
+
+**Where the surface comes from.** The map's class per zone with a confidence and an age is the
+prior; an off-board alert only downgrades, until it expires; the camera confirms or vetoes in
+the last 30-60 m (too late to add a start, in time to veto a commit); the car's own estimate
+only lowers friction, holds low through a slide, and writes the map after a pass. The
+fall-off always comes from the class's tyre curve (the planner's tyre per class, roadmap 061
+M2). L1 plans at the class mixture's lower quantile (mean - k sigma).
 
 ### 4.5 L2: the tracker
 
@@ -273,6 +353,8 @@ envelope (section 5), L1 is not asked for a plan until the car is moving along t
 | event | behaviour | why |
 |---|---|---|
 | L1 late or failed | L2 keeps tracking the last plan; past its end, a stop inside the bounds | the last plan is the best information there is |
+| G fails, another start succeeds | that start's plan is adopted, whatever its mode | M3: the single start stopped where multi-start went on |
+| the surface is worse than the map | the car's estimate lowers friction at once and holds it through the slide; it never raises it mid-slide | 060 M6: an estimate that rose mid-slide crashed the 0.7x patch |
 | the car leaves the plan's envelope | L1 re-solves now, from the measured state | R2 |
 | L2 misses its budget or fails | LQR for that tick; three in a row: a stop along the plan | the LQR never misses |
 | a spin (sideslip and yaw rate outside the recoverable set) | brake to a stop, steering into the slide; reported as the race controller's diagnostic | the spatial planner cannot plan it (4.5) |
@@ -317,7 +399,8 @@ milestones 5 and 6 complete. The same run without L0 is reported alongside.
 ## 8. Left to the builder
 
 W and the grid after the spike; L1's model fidelity and solver; the envelope thresholds; g1;
-the margin per edge type; acados options; the LQR's weights; logging. Each is set once on the
+the margin per edge type; acados options; the LQR's weights; logging; p_add, the quantile's k
+and the schedule's thresholds (from the drift-optimality map). Each is set once on the
 proving ground or the first track, and never per corner.
 
 ## 9. Revision 2: what changed from the first proposal, and why
@@ -334,3 +417,16 @@ proving ground or the first track, and never per corner.
 | why not one long-horizon MPCC, why not a sampled planner | alternatives argued, not just dropped |
 | SR1 / SR2 (1a): at least 110 km/h, no cap, the fastest lap; horizons and budgets sized from v_top (L0's top speed for the track, 134 km/h on Haruna) | user's system requirements |
 | SR3 (1a): the car's top speed, acceleration, deceleration and steering limits from its spec, in every layer; three gaps in today's planner named (motor rpm, regen, steering rate from the spec) and the gate's limits | user's system requirement |
+
+## 10. Revision 3: what changed after roadmap 061's measurements, and why
+
+| change | why |
+|---|---|
+| L1's starts chosen per re-plan from the window ahead (4.4a), not always two or three | asphalt rarely pays for a drift (at most 0.4 %); the cores and the budget go where a drift or a fallback can pay |
+| a held grip start H beside the free G | on low friction a free G slides by itself, so there was no grip plan to weigh against |
+| D from its own last plan, else a corner library solved offline by continuation, else synthetic | a drift start from scratch takes 230-280 iterations at p95; the library's starts reach the optimum most often |
+| the switch: > 0.3 % on two re-plans, grip on a tie, scored at the lower friction quantile | 0.3 % is the solver's noise (p75 at mu 0.45); a 0.1 % gate took a noise-sized gain and gave it back |
+| any feasible start's plan when G fails | the extra starts' measured value is robustness, not lap time |
+| the surface from the map with a confidence; alerts only downgrade, the camera vetoes, the car's estimate only lowers and holds | no sensor sees 200-260 m ahead, none senses the fall-off; 060 M6's estimate rose mid-slide |
+| the planner's tyre peaks at each surface class's own slip; the schedule keyed on class, not on mu | swb's surface layer does (061 M2); on it drift-optimal low-friction cases fell from 53 to 32 of 80 and the gain depends on the class's fall-off, not its friction (ice: none) |
+| solver levers: fewer iterations, then Fatrop, SQP on HPIPM, MUMPS tuning; no HSL, no GPU under the solver | user's ruling; the measured cost split; a GPU loses at ~1000 variables |
