@@ -298,6 +298,42 @@ A derivative method finds a local optimum, the one its start leads to. That is t
 undecided cases (8 of 20 at mu 0.45): grip and drift are separate optima, and a warm start
 stays in its own.
 
+**Why differentiation cannot choose between grip and drift.** Nothing in the model is
+discrete: the rear's slip angle, the steering and the request are all continuous, and no mode
+variable says "drift". The obstacle is that the problem is not convex. The tyre's force rises
+to a peak and falls past it, so the time over a window has several valleys: grip, the rear
+stepped out at turn-in, and others. Between them lies a ridge: a half-slide (the rear 1-3 deg
+past its peak) loses the grip without buying the rotation, or runs wide off the road, and is
+slower than either. A Newton step only goes down from where it starts, so the solver stays in
+its start's valley. A gradient describes the slope where the solver stands; it says nothing of
+a valley over the ridge.
+
+Some of the choices really are discrete:
+- which way the car rotates: a pendulum (Scandinavian) flick slides the other way first, and
+  between the two lies a slide of zero, the worst in between;
+- when the slide starts: on the brakes before the corner, or on the power at the apex;
+- switched events (a wheel locking, ABS cycling, a gear), which the model smooths or leaves out.
+
+What handles it, in order of fit for L1:
+1. **Seeded multi-start.** The same window solved in parallel from two or three starts, each
+   seeded in one mode (the previous plan, a rear-out-at-turn-in guess, perhaps a flick), and
+   the fastest feasible plan kept. A warm solve takes about 0.5 s, so three cores fit the 1 s
+   budget. The seeds make the discrete choice, the derivatives refine each one. The first fix
+   to try.
+2. **Continuation (homotopy).** Solve where a drift wins easily (no fall-off past the peak),
+   then step the fall-off back to the surface's, following the solution: this carries the
+   drift valley into the real problem. The study used it to make low-friction solves converge.
+3. **A sampler picks the mode, the derivatives refine it** (MPPI or CEM on a GPU, then IPOPT).
+   A sampler needs no slope, so it sees every valley at once, coarsely.
+4. **Mixed-integer or complementarity formulations** (an explicit mode variable; a locked wheel
+   as a complementarity constraint). Exact about the discrete choice, far too slow for a
+   re-plan every second.
+
+How much it matters: on asphalt the valleys lie within 0.4 % of each other, so the wrong one
+costs almost nothing. On low friction they differ by 1-2 %, and the drift valley starts its
+trail braking about 25 m before the corner, so the choice must be made early in the window.
+That is where seeded multi-start pays.
+
 **A GPU would not speed up this solver.** The problem is small (about 1000 variables) and
 banded: each node is coupled only to its neighbours, so a Newton step is a sequential sparse
 factorisation, and launch and transfer overheads would exceed the work. What does speed it up:

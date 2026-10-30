@@ -162,7 +162,10 @@ race graph, so a spin is an MRM like any fault.
 - **Drift, measured** (`drift-optimality.md`, 2026-10-30): on asphalt a drift is optimal only
   in tight hairpins and worth at most 0.4 % on swb's asphalt; on low friction 1-2 %. Open for
   low friction: the planner's tyre on each surface's own peak slip angle, the open axle in L1,
-  and a mode choice (multi-start, or a GPU sampler) over the grip and drift optima.
+  and a mode choice over the grip and drift optima, which differentiation cannot make (they
+  are separate valleys of a non-convex problem). First fix to try: seeded multi-start (the
+  window solved in parallel from a grip seed and a rear-out seed, the fastest feasible plan
+  kept; three warm solves fit the 1 s budget on three cores); a GPU sampler after it.
 - **Open**: how much of Autoware to keep long term (perception and NDT are needed only if the
   ring gets traffic or the state must come from sensors).
 
