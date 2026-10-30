@@ -142,3 +142,25 @@ def test_re_solving_along_haruna_is_feasible_and_live():
     assert np.mean(ok) >= 0.95
     p95, p99 = np.percentile(solves, [95, 99])
     assert p95 <= 1.0 and p99 <= 1.5, (p95, p99)
+
+
+def test_a_sideslip_bound_holds_and_costs_no_less_time():
+    """Window(beta_max=...) (a study's, docs/drift-optimality.md) holds the body's sideslip at
+    every node, and a plan held to it is never faster than the free one on the same road from
+    the same start."""
+    c = car()
+    t = road(lambda s: 1.0 / 15.0 if 60.0 <= s < 60.0 + math.pi * 15.0 else 0.0, 160.0, ds=4.0,
+             w=4.0)
+    beta = math.radians(1.0)
+    free = Window(c, ds=4.0, length=160.0, warm=False, grip=1.0)
+    held = Window(c, ds=4.0, length=160.0, warm=False, grip=1.0, beta_max=beta)
+    X, U = initial(t, c, v_start=18.0)
+    x0 = X[:, 0].copy(); x0[0] = 18.0
+    X[:, 0] = x0
+    pf = free.solve(t, 0, x0, 60.0, X, U)
+    ph = held.solve(t, 0, x0, 60.0, X, U)
+    assert pf["ok"] and ph["ok"], (pf["status"], ph["status"])
+    slip = np.abs(np.arctan2(ph["X"][1], ph["X"][0]))
+    assert slip.max() <= beta + 1e-4
+    assert np.abs(np.arctan2(pf["X"][1], pf["X"][0])).max() > beta    # it binds
+    assert ph["time"] >= pf["time"] - 1e-3

@@ -268,8 +268,20 @@ class Window:
     controls, nine rows more than the ellipse): 58 of 59, p50 0.27 s, p95 0.91 s, p99 1.04 s."""
 
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
-                 tol=1e-3, budget=None, warm=True, compile=True, ipopt=None):
+                 tol=1e-3, budget=None, warm=True, compile=True, ipopt=None, beta_max=None,
+                 rear_alpha_max=None):
+        """beta_max: the body's sideslip, |atan(vy / vx)|, at most this (rad) at every node, the
+        last one's END_SLIP with it; rear_alpha_max: the rear axle's slip angle, |atan((vy - lr
+        r) / vx)|, at most this. None (the live planner's) leaves either free. Each is two linear
+        rows per stage, |vy - c r| <= tan(bound) vx: for a study of what sliding buys (a plan
+        held to grip driving against the free one, docs/drift-optimality.md), not a limit of
+        the car."""
         self.car, self.ds, self.grip, self.margin = car, ds, grip, margin
+        self.beta_max, self.rear_alpha_max = beta_max, rear_alpha_max
+        held = [(c, math.tan(b)) for c, b in ((0.0, beta_max), (car.lr, rear_alpha_max))
+                if b is not None]
+        nb = 2 * len(held)
+        end_slip = END_SLIP if beta_max is None else min(END_SLIP, math.tan(beta_max))
         self.N = N = int(round(length / ds)) + 1
         self.M = M = N - 1
         self.f, self.g, lbg, ubg, self.out = node_functions(car, tyres=True)
@@ -289,19 +301,23 @@ class Window:
         Xk, Uk, Ek, xN = Z[:6, :], Z[6:6 + NU, :], Z[6 + NU, :], W[NZ * M:]
         xn_s, dts, G = stage.map(M)(Xk, Uk, Pp)
         n = Xk[3, :] * X_SCALE[3]
+        sx = X_SCALE
         rows = ca.vertcat(xn_s - ca.horzcat(Xk[:, 1:], xN), G,     # each stage's, together
                           n + Ek + Pw[5, :], n - Ek - Pw[4, :])
-        sx = X_SCALE
-        end = ca.vertcat(sx[1] * xN[1] + END_SLIP * sx[0] * xN[0],
-                         sx[1] * xN[1] - END_SLIP * sx[0] * xN[0])
+        for c, tb in held:                       # vy - c r - tb vx <= 0 <= vy - c r + tb vx
+            v = sx[1] * Xk[1, :] - c * sx[2] * Xk[2, :]
+            rows = ca.vertcat(rows, v - tb * sx[0] * Xk[0, :], v + tb * sx[0] * Xk[0, :])
+        end = ca.vertcat(sx[1] * xN[1] + end_slip * sx[0] * xN[0],
+                         sx[1] * xN[1] - end_slip * sx[0] * xN[0])
         a = Uk[1, :] * U_SCALE[1]
         T = (ca.sum2(dts) + REG_STEER * ds * ca.sumsqr(Uk[0, :] * U_SCALE[0])
              + REG_ACCEL * ca.sumsqr(a[1:] - a[:-1]) + EDGE_PENALTY * ca.sum2(Ek))
-        self.lbg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.lbg, 0.0, -np.inf], M),
+        blo, bhi = [-np.inf, 0.0] * len(held), [0.0, np.inf] * len(held)
+        self.lbg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.lbg, 0.0, -np.inf, blo], M),
                                        [0.0, -np.inf]])
-        self.ubg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.ubg, np.inf, 0.0], M),
+        self.ubg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.ubg, np.inf, 0.0, bhi], M),
                                        [np.inf, 0.0]])
-        per = 6 + ng + 2
+        per = 6 + ng + 2 + nb
         # warm-started in its multipliers too (shifted with the window), so the barrier starts
         # low (cold: IPOPT's own start, for the first plan and after a failure)
         extra, ipopt = ipopt or {}, {"max_iter": max_iter, "tol": tol, "acceptable_tol": 1e-3,
@@ -332,16 +348,19 @@ class Window:
         js = ca.Function("l1_stage_jac", [zs, ps], [ca.jacobian(ca.vertcat(o[0], o[2]), zs)])
         gs = ca.Function("l1_stage_grad", [zs, ps], [ca.gradient(o[1], zs)])
         Jm, gm = js.map(M)(Z, Pp), gs.map(M)(Z, Pp)
-        lin = ca.DM.zeros(2, NZ)                  # the edge rows' (n, e)
+        lin = ca.DM.zeros(2 + nb, NZ)             # the edge rows' (n, e), the slips' (vx vy r)
         lin[0, 3], lin[0, 6 + NU] = X_SCALE[3], 1.0
         lin[1, 3], lin[1, 6 + NU] = X_SCALE[3], -1.0
+        for j, (c, tb) in enumerate(held):
+            for i, sign in ((2 + 2 * j, -1.0), (3 + 2 * j, 1.0)):
+                lin[i, 0], lin[i, 1], lin[i, 2] = sign * tb * sx[0], sx[1], -c * sx[2]
         blocks = [ca.vertcat(b, lin) for b in ca.horzsplit(Jm, NZ)]
         nw = NZ * M + 6
         couple = ca.DM.zeros(per * M + 2, nw)     # x_k+1 in stage k's dynamics; the end rows
         for k in range(M):
             couple[k * per:k * per + 6, (k + 1) * NZ:(k + 1) * NZ + 6] = -ca.DM.eye(6)
-        couple[per * M, NZ * M:] = ca.horzcat(END_SLIP * sx[0], sx[1], 0, 0, 0, 0)
-        couple[per * M + 1, NZ * M:] = ca.horzcat(-END_SLIP * sx[0], sx[1], 0, 0, 0, 0)
+        couple[per * M, NZ * M:] = ca.horzcat(end_slip * sx[0], sx[1], 0, 0, 0, 0)
+        couple[per * M + 1, NZ * M:] = ca.horzcat(-end_slip * sx[0], sx[1], 0, 0, 0, 0)
         couple = ca.DM(ca.sparsify(couple))
         Jg = ca.vertcat(ca.horzcat(ca.diagcat(*blocks), ca.MX(per * M, 6)), ca.MX(2, nw)) + couple
         gvec = ca.vertcat(ca.vec(rows), end)

@@ -141,7 +141,8 @@ def _warm_start(track, car, margin, v_start):
     return X, U
 
 
-def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, verbose, w_both):
+def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, verbose, w_both,
+           beta_max=None, rear_alpha_max=None):
     closed = track.closed
     N, M = len(track.s), len(h)
     opti = ca.Opti()
@@ -172,6 +173,13 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
     if car.wheel_speed_max is not None:   # the motor's rpm through its gear, at the driven rims
         opti.subject_to(ca.vec(U[3:5, :]) <= car.wheel_speed_max)
     opti.subject_to(opti.bounded(-math.pi / 2, ca.vec(X[4, :]), math.pi / 2))
+    # |vy - c r| <= tan(bound) vx: the sideslip (c 0) or the rear axle's slip angle (c lr) held
+    # (a study's: docs/drift-optimality.md)
+    for c, bound in ((0.0, beta_max), (car.lr, rear_alpha_max)):
+        if bound is not None:
+            tb = math.tan(bound)
+            opti.subject_to(opti.bounded(-tb * ca.vec(X[0, :]), ca.vec(X[1, :] - c * X[2, :]),
+                                         tb * ca.vec(X[0, :])))
     if not closed:
         opti.subject_to(X[3, 0] == 0)
         opti.subject_to(X[4, 0] == 0)
@@ -194,7 +202,7 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
 
 
 def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False,
-                   grip=1.0):
+                   grip=1.0, beta_max=None, rear_alpha_max=None, warm=None):
     """The minimum-time trajectory along `track` for `car`. Open tracks start at v_start (m/s,
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
@@ -202,6 +210,10 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     the solver's own X (6 x N) and U (7 x M), to warm-start another solve from.
     grip: the share of the road's friction the plan may use (1: all of it); below 1 it leaves a
     tracker room for what the model gets wrong at the limit.
+    beta_max, rear_alpha_max: the body's sideslip, the rear axle's slip angle, held within it
+    (rad) at every node; None leaves it free (a study's: how much slower a plan held to grip
+    driving is). warm: (X, U) to start from (another
+    solve's), the minimum-curvature line's otherwise.
 
     Solves in turn: first with each wheel's torque free within its brake and the motor, from the
     minimum-curvature line's warm start; then the car's own, from that, once per W_BOTH. Started cold, the brake system's coupling
@@ -217,15 +229,15 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
         h = np.diff(s)
     M = len(h)
     P = np.vstack([track.kappa, grip * track.mu, track.grade, track.sliding])
-    X0, U0 = _warm_start(track, car, margin, v_start)
+    X0, U0 = _warm_start(track, car, margin, v_start) if warm is None else warm
     ok, status, Xv, Uv = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
-                                max_iter, verbose, 0.0)
+                                max_iter, verbose, 0.0, beta_max, rear_alpha_max)
     stages = [status]
     for w_both in W_BOTH:
         if not ok:
             break
         ok, status, Xv, Uv = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
-                                    max_iter, verbose, w_both)
+                                    max_iter, verbose, w_both, beta_max, rear_alpha_max)
         stages.append(status)
     vx, vy, r, n, xi, delta = Xv
     sdot = (vx * np.cos(xi) - vy * np.sin(xi)) / (1 - n * track.kappa)
