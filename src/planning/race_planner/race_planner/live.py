@@ -118,6 +118,11 @@ class Driver:
     # (the reading itself, back to 1 as soon as the car is on its plan's sideslip); or a
     # surface.FrictionEstimate: only lowers, held through a slide, released slowly after
     estimator: object = None
+    # the body's sideslip bound in every L1 window, the seeds' too (rad; None: free, 060's). An
+    # option, not adopted: roadmap 061 M4 found the free planner's 50-70 deg mud-hairpin slides
+    # not followed by L2 and the ECU, but a 45 deg bound did not make them drivable either
+    # (docs/mode-choice-m4.md)
+    beta_max: float = None
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -144,9 +149,10 @@ class Driver:
             # two windows long (a warm start's cold tail starts up to 0.8 of a window on and
             # runs a whole one: one window crashed Isaac's run at the finish)
             self.track = self.track.extended(2 * self.length + 4 * self.ds)
-        self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False)
+        self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
+                           beta_max=self.beta_max)
         self.warm = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
-                           budget=self.budget)
+                           budget=self.budget, beta_max=self.beta_max)
         self.plan = self.pending = None
         self.next_replan = 0.0
         self.busy_until = 0.0          # L1's core is busy with a solve until then

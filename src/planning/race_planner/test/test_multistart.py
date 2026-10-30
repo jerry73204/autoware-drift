@@ -64,19 +64,21 @@ def test_back_to_grip_by_the_same_gate_or_when_the_slide_is_over():
     assert m.mode == "grip"
 
 
-def drive(track, multistart, s_end, v0=12.0):
+def drive(track, multistart, s_end, v0=12.0, beta_max=None, plans=None):
     """The driver with its seeds along `track` on the plans it adopts. Each seed is given 3 s
     rather than 0.9 so that a loaded host cannot cut a seed's solve short and so change the
     choice; a slow solve only delays its adoption."""
     multistart = dict(multistart, seed_budget=3.0)
     c = Car.from_spec(SPEC)
-    d = Driver(c, track, NoTracker(), multistart=multistart)
+    d = Driver(c, track, NoTracker(), multistart=multistart, beta_max=beta_max)
     f = PlanFollower(d, 10.0, v0)
     st = f.state()
     try:
         d.start(st)
         while st["s"] < s_end and st["t"] < 120.0 and d.stopping is None:
             d.step(st)
+            if plans is not None and (not plans or plans[-1] is not d.plan):
+                plans.append(d.plan)
             st = f.step(0.05)
     finally:
         d.close()
@@ -104,6 +106,31 @@ def test_the_driver_takes_a_slippery_hairpin_in_a_drift_and_keeps_to_it():
     sw = switches(d)
     assert sw and sw[0][1] == "drift" and sw[0][0] < 100.0, sw
     assert len(sw) <= 2 and all(m == "grip" for _, m in sw[1:]), sw
+
+
+def test_a_sideslip_bound_holds_in_every_plan_the_driver_adopts():
+    """Driver(beta_max=...) (roadmap 061 M4: the free planner's 50-70 deg mud-hairpin slides
+    were not drivable by L2 and the ECU) holds the body's sideslip in L1's cold and warm windows
+    and in every seed's: on the slippery hairpin no plan the driver adopts, its own or a seed's,
+    slides past the bound, and the car still gets round. (The bound changes IPOPT's path, not
+    only its optimum: on this hairpin a cold first plan held at 30 or 45 deg ran out of
+    iterations where 60 and the free one did not; M4 found the opposite on a mud hairpin.)"""
+    t = hairpin(9.0, 0.45)
+    bound = math.radians(60.0)
+    held = []
+    d, st = drive(t, {"cpus": None}, s_end=200.0, beta_max=bound, plans=held)
+    assert d.beta_max == bound and d.cold.beta_max == bound and d.warm.beta_max == bound
+    assert d.stopping is None and st["s"] >= 200.0
+    slip = lambda p: float(np.max(np.abs(np.arctan2(p["X"][1], p["X"][0]))))
+    assert len(held) > 3 and max(slip(p) for p in held) <= bound + 1e-3
+
+
+def test_no_sideslip_bound_by_default():
+    """060's driver: L1's windows free (no beta_max), so its plans are as before."""
+    c = Car.from_spec(SPEC)
+    t = road(lambda s: 0.0, 400.0, ds=4.0, w=5.0)
+    d = Driver(c, t, NoTracker())
+    assert d.beta_max is None and d.cold.beta_max is None and d.warm.beta_max is None
 
 
 def test_on_an_asphalt_bend_the_driver_stays_grip():
