@@ -344,7 +344,9 @@ class MultiStart:
             return False
         sch = self.scheduler
         width = float(np.min(self.track.w_left[m] + self.track.w_right[m]))
-        return not any(sch.dmap.pays(x, c.R, c.turn, width) for x in reads)
+        return not any(sch.dmap.pays(x, c.R, c.turn, width,
+                                     falloff=sch.table.sliding(x) < sch.rules["flat"])
+                       for x in reads)
 
     def _held_seed(self, base, bound):
         """H's start where it has no plan of its own: the grip base with the rear axle's slip

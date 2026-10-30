@@ -96,19 +96,27 @@ def sched(**kw):
     return Scheduler(t, car(), table(), grip=0.92, **kw)
 
 
-def test_dry_open_asphalt_runs_g_alone_and_a_dry_hairpin_adds_h_and_d():
+def test_dry_open_asphalt_runs_g_alone_and_only_a_hairpin_whose_gain_clears_the_gate_adds_h_d():
     s = sched()
     assert s.corner_starts(corner(60.0, math.pi / 2, {"asphalt": 1.0}))[0] == set()
     assert s.corner_starts(corner(40.0, math.pi, {"asphalt": 1.0}))[0] == set()
-    assert s.corner_starts(corner(12.0, math.radians(170), {"asphalt": 1.0}))[0] == {"H", "D"}
-    assert s.corner_starts(corner(12.0, math.radians(100), {"asphalt": 1.0}))[0] == set()
+    # R 9 pays 0.40 % (>= the 0.3 % switch threshold), R 15 0.23 %: not every hairpin
+    assert s.corner_starts(corner(10.0, math.radians(170), {"asphalt": 1.0}))[0] == {"H", "D"}
+    assert s.corner_starts(corner(12.0, math.radians(170), {"asphalt": 1.0}))[0] == set()
+    assert s.corner_starts(corner(15.0, math.pi, {"asphalt": 1.0}))[0] == set()
+    assert s.corner_starts(corner(10.0, math.radians(100), {"asphalt": 1.0}))[0] == set()
+    # the old rule (gain_min on every class) seeded every asphalt hairpin up to R 31
+    old = sched(rules={"gain_falloff": 0.05})
+    assert old.corner_starts(corner(15.0, math.pi, {"asphalt": 1.0}))[0] == {"H", "D"}
 
 
 def test_loose_ground_without_fall_off_adds_f_into_hairpins_ice_only_h():
     s = sched()
     assert s.corner_starts(corner(9.0, math.pi, {"mud_wet": 1.0}))[0] == {"H", "D", "F"}
     assert s.corner_starts(corner(15.0, math.pi / 2, {"mud_wet": 1.0}))[0] == {"H", "D"}
-    assert s.corner_starts(corner(15.0, math.pi, {"gravel": 1.0}))[0] == {"H", "D"}   # falls off
+    assert s.corner_starts(corner(9.0, math.pi, {"gravel": 1.0}))[0] == {"H", "D"}    # falls off:
+    assert s.corner_starts(corner(15.0, math.pi, {"gravel": 1.0}))[0] == set()      # 0.15 % < 0.3
+    assert s.corner_starts(corner(25.0, math.pi / 2, {"mud_wet": 1.0}))[0] == {"H", "D"}  # 0.12 %
     assert s.corner_starts(corner(9.0, math.pi, {"ice": 1.0}))[0] == {"H"}
 
 

@@ -17,7 +17,9 @@ runs.
 - `Scheduler.starts` applies the table of design 4.4a to the corner the choice is about (the
   first whose turn-in is SEED_LEAD or more ahead: the corner the seeds go into), the union over
   every class at least p_add probable (loose in):
-    D  where a drift pays (the map), or on a steep downhill on low friction;
+    D  where a drift pays (the map: above gain_min on a class without fall-off; on one that falls
+       off, asphalt among them, only above gain_falloff, the switch threshold), or on a steep
+       downhill on low friction;
     H  with D, and wherever the window holds low friction (the fallback when G fails);
     F  with D into a hairpin on a surface without fall-off (tighter than F_R_DRY on asphalt-like
        friction, HAIRPIN_R elsewhere);
@@ -40,6 +42,8 @@ DRIFT_MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drift_map.
 RULES = {
     "p_add": 0.15,          # a class this probable adds its row's starts (design: ~0.1-0.2)
     "gain_min": 0.05,       # %: a cell pays if its drift wins by this much (above the study's noise)
+    "gain_falloff": 0.3,    # %: on a class that falls off past the peak (asphalt, gravel, packed
+                            #   snow), only a cell whose drift clears the switch threshold pays
     "r_tol": 1.25,          # a corner up to this times a paying cell's radius pays
     "turn_tol": math.radians(30.0),   # and turning down to this less than it
     "ahead": 25.0,          # m: no new D or F into a corner whose turn-in is nearer
@@ -91,11 +95,15 @@ class DriftMap:
             [x for x in ws if x <= width + 1e-6] or [ws[0]])
         return [x for x in self.cells[c] if x[3] == w]
 
-    def pays(self, c, R, turn, width=None):
+    def pays(self, c, R, turn, width=None, falloff=False):
         """Whether a drift pays in a corner of radius R (m), turning `turn` (rad), on class c, on a
-        road `width` m wide (None: unknown, the narrowest measured)."""
+        road `width` m wide (None: unknown, the narrowest measured). falloff: the class falls off
+        past its peak, so its cell must clear gain_falloff (the switch threshold: a D start whose
+        gain the gate would never take is a core spent for nothing where G does not fail), not
+        gain_min (roadmap 061 M4's tightened asphalt rule)."""
         r = self.rules
-        return any(g >= r["gain_min"] and R <= Rm * r["r_tol"] and turn >= tm - r["turn_tol"]
+        g_min = r["gain_falloff"] if falloff else r["gain_min"]
+        return any(g >= g_min and R <= Rm * r["r_tol"] and turn >= tm - r["turn_tol"]
                    for Rm, tm, g, _ in self._cells(c, width))
 
 
@@ -189,14 +197,14 @@ class Scheduler:
         for c, p in ca.probs.items():
             if p < r["p_add"]:
                 continue
-            d = self.dmap.pays(c, ca.corner.R, ca.corner.turn, ca.width)
+            flat = self.table.sliding(c) >= r["flat"]
+            d = self.dmap.pays(c, ca.corner.R, ca.corner.turn, ca.width, falloff=not flat)
             if not d and self.low(c) and ca.grade < r["downhill"]:
                 d = True
                 why.append(f"{c} downhill")
             if d:
                 out |= {"H", "D"}
                 why.append(f"{c} pays")
-                flat = self.table.sliding(c) >= r["flat"]
                 r_f = r["f_r_dry"] if self.table.mu_of[c] >= r["mu_dry"] else modes.HAIRPIN_R
                 if flat and hair and ca.corner.R <= r_f:
                     out.add("F")

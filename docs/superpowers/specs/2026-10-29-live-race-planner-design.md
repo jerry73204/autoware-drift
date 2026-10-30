@@ -301,9 +301,9 @@ continuation), else a synthetic profile. F: a pendulum flick.
 | the window ahead holds | starts |
 |---|---|
 | dry asphalt, no corner past ~120 deg tighter than R 25 m | G (as 060) |
-| a dry asphalt hairpin (>= 150 deg, R <= 25 m) | G, H, D |
+| a dry asphalt hairpin whose drift gain in the map clears the switch threshold (0.3 %: today R <= ~11 m, >= 150 deg) | G, H, D |
 | the same at R <= 9 m on a surface without fall-off | + F |
-| a hairpin (R <= 25 m) on loose ground falling off past the peak (gravel, dirt, grass) or packed snow | G, H, D |
+| a hairpin on loose ground falling off past the peak (gravel, dirt, grass) or packed snow, its gain in the map >= 0.3 % (today R <= ~11 m) | G, H, D (H on low friction anyway, as the fallback) |
 | any corner on loose ground that does not fall off (mud, sand, loose snow), with a probability above p_add (~0.1-0.2), on a road up to ~8 m wide; from 10 m its hairpins and tightest 90s only | G, H, D (+ F into hairpins) |
 | ice | G, H (no drift pays; H is the fallback) |
 | a steep downhill (> 5 %) on low friction | + D |
@@ -436,4 +436,5 @@ proving ground or the first track, and never per corner.
 | the surface from the map with a confidence; alerts only downgrade, the camera vetoes, the car's estimate only lowers and holds | no sensor sees 200-260 m ahead, none senses the fall-off; 060 M6's estimate rose mid-slide |
 | the planner's tyre peaks at each surface class's own slip; the schedule keyed on class, not on mu | swb's surface layer does (061 M2); on it drift-optimal low-friction cases fell from 53 to 32 of 80 and the gain depends on the class's fall-off, not its friction (ice: none) |
 | width keys the drift map (M3b's arm); H is the fallback, not a competitor; G alone is solved as 060's, in the driver's own process | narrow loose roads drift in 90 deg corners, wide ones do not, hairpins at every width; H weighed in the gate cost Tsukuba 0.55 %; a G-only re-plan is then 060's exactly (R6) |
+| on a class that falls off past the peak (asphalt, gravel, dirt, grass, packed snow) a D start only where the map's gain for the corner clears the switch threshold (0.3 %), not the noise floor (0.05 %); classes without fall-off unchanged (user, 2026-10-30: "we don't pursue drift start for most dry asphalt roads") | a D whose gain the gate can never take is a core spent for nothing where G does not fail; Haruna's chain: G alone on 51-59 % of re-plans (was 43 %), 1.73-1.81 solves a re-plan (2.13), the same time; Tsukuba G alone throughout (061 M4) |
 | solver levers: fewer iterations, then Fatrop, SQP on HPIPM, MUMPS tuning; no HSL, no GPU under the solver | user's ruling; the measured cost split; a GPU loses at ~1000 variables |
