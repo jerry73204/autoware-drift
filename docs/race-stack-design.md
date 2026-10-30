@@ -165,7 +165,7 @@ race graph, so a spin is an MRM like any fault.
   and a mode choice over the grip and drift optima, which differentiation cannot make (they
   are separate valleys of a non-convex problem). First fix to try: seeded multi-start (the
   window solved in parallel from a grip seed and a rear-out seed, the fastest feasible plan
-  kept; three warm solves fit the 1 s budget on three cores); a GPU sampler after it.
+  kept; three warm solves on three cores, each cut at the budget (p95 0.91 s today, so tight)); a GPU sampler after it.
 - **Open**: how much of Autoware to keep long term (perception and NDT are needed only if the
   ring gets traffic or the state must come from sensors).
 

@@ -290,7 +290,8 @@ constraints, and the time (the sum of ds / s-dot) as the cost. CasADi builds it 
 differentiates it exactly (gradient, constraint Jacobian, Lagrangian Hessian, by algorithmic
 differentiation) and compiles it to C; IPOPT, an interior-point method, takes Newton steps on
 it, each one sparse linear solve (MUMPS, the default). Warm-started from the previous plan it
-converges in tens of iterations; 95 % of the Haruna solves took under 0.5 s on one core. L2
+converges in tens of iterations: on Haruna, with the live model (PhysX tyres, seven controls), p50
+0.27 s, p95 0.91 s, p99 1.04 s on one core (window.py's docstring). L2
 (tracker.py) is a real-time iteration: the same model linearised about the plan each tick, one
 QP solved by HPIPM at 50 Hz.
 
@@ -317,8 +318,9 @@ Some of the choices really are discrete:
 What handles it, in order of fit for L1:
 1. **Seeded multi-start.** The same window solved in parallel from two or three starts, each
    seeded in one mode (the previous plan, a rear-out-at-turn-in guess, perhaps a flick), and
-   the fastest feasible plan kept. A warm solve takes about 0.5 s, so three cores fit the 1 s
-   budget. The seeds make the discrete choice, the derivatives refine each one. The first fix
+   the fastest feasible plan kept. A warm solve takes 0.27 s at the median but 0.91 s at p95, so
+   three cores fit the 1 s budget only just: a seed far from its valley takes more iterations,
+   and one not feasible by the budget is dropped. The seeds make the discrete choice, the derivatives refine each one. The first fix
    to try.
 2. **Continuation (homotopy).** Solve where a drift wins easily (no fall-off past the peak),
    then step the fall-off back to the surface's, following the solution: this carries the
