@@ -280,6 +280,55 @@ earlier, which on snow, where a front tyre alone turns the car slowly, is worth 
   sequence (a slide to set up the next corner) can change the hairpin results; the car is
   drift_mustang (50:50, 330 kW rear motor, spool, 58 deg lock).
 
+## How the planner finds its optimum, and what a GPU would change
+
+Both layers optimise by derivatives, not by sampling. L1 (window.py) is a direct transcription:
+the 200-260 m window is 50-65 nodes 4 m apart, each with the state (n, xi, vx, vy, r, delta)
+and the controls (steer rate, the acceleration request, the wheels' peripheral speeds), the
+model's step between nodes, the car's limits, the road's edges and the tyre rows as
+constraints, and the time (the sum of ds / s-dot) as the cost. CasADi builds it symbolically,
+differentiates it exactly (gradient, constraint Jacobian, Lagrangian Hessian, by algorithmic
+differentiation) and compiles it to C; IPOPT, an interior-point method, takes Newton steps on
+it, each one sparse linear solve (MUMPS, the default). Warm-started from the previous plan it
+converges in tens of iterations; 95 % of the Haruna solves took under 0.5 s on one core. L2
+(tracker.py) is a real-time iteration: the same model linearised about the plan each tick, one
+QP solved by HPIPM at 50 Hz.
+
+A derivative method finds a local optimum, the one its start leads to. That is this study's
+undecided cases (8 of 20 at mu 0.45): grip and drift are separate optima, and a warm start
+stays in its own.
+
+**A GPU would not speed up this solver.** The problem is small (about 1000 variables) and
+banded: each node is coupled only to its neighbours, so a Newton step is a sequential sparse
+factorisation, and launch and transfer overheads would exceed the work. What does speed it up:
+a linear solver that uses the stage structure (a Riccati recursion, as HPIPM and acados do, or
+MA57/MA27 in place of MUMPS), fewer iterations, and a core of its own.
+
+**A GPU is the tool for what derivatives do badly, choosing between optima:**
+
+1. Sampling MPC (MPPI, model predictive path integral): thousands of noisy control sequences
+   rolled out in parallel and averaged by their cost. It needs no derivatives, is indifferent
+   to the tyre's fall-off and to grip-or-drift choices, and drove a 1:5 car sliding on dirt on
+   a GPU (Williams et al., below). Its plans are coarse and it holds hard constraints (the road's
+   edge, the motor's limits) only through penalties.
+2. Multi-start: the same NLP solved from several starts per corner (a grip start, a drift start)
+   and the fastest feasible plan kept. This attacks the local optima directly. CPU cores do it
+   too; a batched GPU solver scales further.
+3. Both: a sampler picks the mode (grip or drift, which way round), the derivative solver
+   refines it into an exact, feasible plan, and L2 tracks it.
+
+## What it means for the race stack
+
+- On asphalt a drift is worth at most a few tenths of a percent, in tight hairpins only. The
+  live planner may plan one there (it is optimal in the model), but there is nothing to chase:
+  no setting should push the car into a slide on asphalt.
+- On loose or low-friction surfaces it is worth 1-2 % and changes the line (trail braking into a
+  slide from before the corner). Before that is relied on: the planner's tyre must take each
+  surface's own peak slip angle (swb's surface layer rescales it, the planner's does not: 3 deg
+  on snow against swb's 6), the open axle must be in L1 (it models the locked one only), and L1
+  must look at both modes (multi-start, or a sampler choosing the mode).
+- The GPU belongs there, on the mode choice, not under IPOPT.
+
 ## Literature
 
 - Tavernini, Massaro, Velenis, Katzourakis and Lot, *Minimum time cornering: the effect of road
@@ -294,6 +343,10 @@ earlier, which on snow, where a front tyre alone turns the car slowly, is worth 
   the corner while the car rotates at a large sideslip), the rally technique, as the solution of
   a minimum-time cornering problem. Our low-friction hairpins plan the same shape: braking, and
   the rear sliding from before the corner to the apex.
+- Williams, Drews, Goldfain, Rehg and Theodorou, *Aggressive driving with model predictive path
+  integral control*, ICRA 2016, and Williams et al., *Information theoretic MPC for model-based
+  reinforcement learning*, ICRA 2017: MPPI on a GPU driving the AutoRally car at the limit on a
+  dirt track, sliding.
 - Perantoni and Limebeer, *Optimal control for a Formula One car with variable parameters*,
   Vehicle System Dynamics 52(5), 2014: the spatial (curvilinear) minimum-time formulation ocp.py
   and window.py use.
