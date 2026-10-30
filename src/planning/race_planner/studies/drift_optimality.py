@@ -25,6 +25,11 @@ Run: env -u PYTHONPATH .venv/bin/python studies/drift_optimality.py <grid> [--jo
 (grids: coarse (beta hold), rear, relaxed, l0, regen, power, grade, deep; results under OUT as
 csv and npz), then `report` (the figures beside docs/drift-optimality.md) and `deep-report`
 (the 170 deg corners' speeds and energy, deep_speeds.csv).
+
+Multistart (roadmap 061 M1, docs/mode-choice-m1.md): grids multistart (the study's settings;
+first), multistart-live, multistart-live-warm (the live window, one budgeted solve a start)
+and e0b (the live grid on MUMPS and on SPRAL), results under MS_OUT as jsonl and npz; then
+`multistart-report`.
 """
 import argparse
 import csv
@@ -59,19 +64,19 @@ BETA_HOLD = math.radians(2.0)
 REAR_PAST = 3.0      # deg: a free plan's rear axle this far past its tyre's peak slides
 
 
-def section(R, theta, mu, sliding, grade=0.0):
+def section(R, theta, mu, sliding, grade=0.0, ds=DS):
     """The track: L_IN straight, a ramp up to 1 / R, the arc, a ramp down, the rest straight
-    (left turn). The arc's length is what makes the whole turn theta. Returns (track, s_in,
-    s_out): where the corner's ramps start and end."""
-    s = np.arange(0.0, LENGTH + DS / 2, DS)
+    (left turn), on a grid of ds. The arc's length is what makes the whole turn theta. Returns
+    (track, s_in, s_out): where the corner's ramps start and end."""
+    s = np.arange(0.0, LENGTH + ds / 2, ds)
     arc = theta * R - RAMP
     assert arc > 0, (R, theta)
     s1, s2, s3, s4 = L_IN, L_IN + RAMP, L_IN + RAMP + arc, L_IN + 2 * RAMP + arc
     assert s4 + EXIT_TIMED + 20 < LENGTH, (R, theta)
     k = np.interp(s, [0, s1, s2, s3, s4, LENGTH], [0, 0, 1 / R, 1 / R, 0, 0])
-    psi = np.concatenate([[0.0], np.cumsum(0.5 * (k[1:] + k[:-1]) * DS)])
-    x = np.concatenate([[0.0], np.cumsum(0.5 * (np.cos(psi[1:]) + np.cos(psi[:-1])) * DS)])
-    y = np.concatenate([[0.0], np.cumsum(0.5 * (np.sin(psi[1:]) + np.sin(psi[:-1])) * DS)])
+    psi = np.concatenate([[0.0], np.cumsum(0.5 * (k[1:] + k[:-1]) * ds)])
+    x = np.concatenate([[0.0], np.cumsum(0.5 * (np.cos(psi[1:]) + np.cos(psi[:-1])) * ds)])
+    y = np.concatenate([[0.0], np.cumsum(0.5 * (np.sin(psi[1:]) + np.sin(psi[:-1])) * ds)])
     one = np.ones_like(s)
     t = Track(s=s, x=x, y=y, z=-grade * s, psi=psi, kappa=k, w_left=HALF_WIDTH * one,
               w_right=HALF_WIDTH * one, mu=mu * one, closed=False, sliding=sliding * one,
@@ -326,6 +331,647 @@ def grid(name):
         raise SystemExit(f"no grid {name}")
 
 
+# ---- multistart: a start in each valley (roadmap 061 M1, docs/mode-choice-m1.md) ----
+#
+# Each case is solved free from about eight starts, at the study's settings and at the live
+# planner's, and the best feasible time over all of them is the case's oracle. The starts:
+#
+# - C, cold: window.initial (the minimum-curvature line at the quasi-steady speed), the live
+#   loop's own first plan and the study's free0;
+# - G, grip: the plan held to the rear tyres' peak (the held window, cold), the bound then
+#   removed: what a live planner that defaults to grip warm-starts from, its last plan shifted
+#   (offline there is no last plan; the held plan is the grip valley's own). This is also the
+#   brief's held->free start: the two are one here;
+# - Ds, rear out, synthetic: G with the body turned so that the rear axle runs SEED_PAST past
+#   its tyre's peak from D_FROM before turn-in to the apex (the path and speed kept, the yaw rate
+#   and the steering made to match, the front axle's slip kept), the request braking on low
+#   friction and coasting on asphalt there;
+# - Dc, rear out by continuation: the free plan with no fall-off (sliding 1.0, where a drift
+#   wins easily), then the fall-off stepped to the surface's (CONT_STEPS), each step from the
+#   last; on a surface with no fall-off it is C itself;
+# - F, flick: as Ds, the rear first out the other way (FLICK_PAST, ahead of the turn-in);
+# - P1-P3: G with smooth noise on every state.
+#
+# A held plan is solved twice (cold, and from the oracle's plan clipped into the bound), the
+# better kept: the grip time a drift has to beat.
+
+MS_OUT = os.path.join(SWB, "play_log/race_planner/mode_choice/m1")
+SETTINGS = {
+    # the study's: one window over the whole section, tight tolerance, no budget
+    "study": {"ds": 2.0, "length": 360.0, "tol": 1e-6, "max_iter": 3000, "budget": None,
+              "warm": False},
+    # the live planner's (live.Driver's warm window): ds 4, its tolerance, iterations and
+    # budget; 260 m, the longest window the Driver builds for these speeds. IPOPT's own barrier
+    # start (warm False): a seed has no multipliers of its own (window.solve: rows' without the
+    # bounds' cost more than none), and mu_init 1e-6 from a point that is not near optimal
+    # stalls (measured: docs/mode-choice-m1.md)
+    "live": {"ds": 4.0, "length": 260.0, "tol": 1e-3, "max_iter": 400, "budget": 1.0,
+             "warm": False},
+    "live_warm": {"ds": 4.0, "length": 260.0, "tol": 1e-3, "max_iter": 400, "budget": 1.0,
+                  "warm": True},
+}
+LIVE_TIMED = 220.0                 # m: a live window's time read at most here, 40 m short of its end
+SEED_PAST = math.radians(7.5)      # the rear-out seeds' rear axle past its tyre's peak
+FLICK_PAST = math.radians(5.0)     # the flick's first slide, the other way
+D_FROM = 25.0                      # m before turn-in the rear-out seed starts sliding
+D_BRAKE = -0.3                     # m/s^2: its request on low friction (mu < 0.7); 0 above
+CONT_STEPS = (1.0, 0.9, 0.8, 0.7, 0.6)
+SEEDS = ("C", "G", "Ds", "Dc", "F", "P1", "P2", "P3")
+_MS_WINDOWS = {}
+
+
+def ms_window(setting, held=None, linsol="mumps", budget=True):
+    """The window for a setting (SETTINGS), held by `held` or free, on IPOPT's linear solver
+    `linsol`, under the setting's budget or (budget False) none (built once per process)."""
+    key = (setting, tuple(sorted((held or {}).items())), linsol, budget)
+    if key not in _MS_WINDOWS:
+        from race_planner import window as wmod
+        wmod.SLOPE_MIN, wmod.KAPPA_MAX = 0.01, 0.6
+        o = dict(SETTINGS[setting])
+        ipopt = dict(o.get("ipopt", {}))
+        if linsol != "mumps":
+            ipopt["linear_solver"] = linsol
+        # without the budget (the first plan, the held ones): live.Driver's cold window
+        _MS_WINDOWS[key] = wmod.Window(make_car(), ds=o["ds"], length=o["length"], grip=1.0,
+                                       warm=o["warm"] and budget, tol=o["tol"], max_iter=o["max_iter"],
+                                       budget=o["budget"] if budget else None, ipopt=ipopt,
+                                       **(held or {}))
+    return _MS_WINDOWS[key]
+
+
+def _zone(s, a, b, ramp_in, ramp_out):
+    """1 on [a, b], ramped linearly to 0 over ramp_in before and ramp_out after."""
+    return np.clip(np.minimum((s - (a - ramp_in)) / ramp_in, ((b + ramp_out) - s) / ramp_out),
+                   0.0, 1.0)
+
+
+def _consistent_u(X, U, t, car, w=None, a_req=None):
+    """U (7 x M) made to match states X: the steering rate from delta, the turn's acceleration,
+    and where w > 0 the request blended to a_req and the wheels' speeds for it (wheel_speeds)."""
+    from race_planner.window import wheel_speeds
+    M = X.shape[1] - 1
+    s = t.s[:X.shape[1]]
+    U = np.array(U, float).copy()
+    rate = car.steer_rate_max or 1.0
+    U[0] = np.clip(np.gradient(X[5], s)[:M] * X[0, :M], -rate, rate)
+    U[3] = X[0, :M] * X[2, :M]
+    if w is not None:
+        wm = w[:M]
+        if a_req is not None:
+            U[1] = (1 - wm) * U[1] + wm * a_req
+            U[2] = (1 - wm) * U[2] + wm * a_req
+        ws = wheel_speeds(car, X[:, :M], U[1])
+        U[4:7] = (1 - wm) * U[4:7] + wm * ws
+    return U
+
+
+def reshape_slip(X, U, t, car, target, w, a_req=None):
+    """A seed from plan (X, U): the body turned so that the rear axle's slip angle is `target`
+    (rad, per node) where w is 1, blended where 0 < w < 1, untouched where w is 0. The path and
+    the speed are kept (the velocity's heading to the track, xi + beta, and |v|); the heading xi
+    gives way to the new sideslip, the yaw rate follows from it (sdot (dxi/ds + kappa)), and the
+    steering keeps the front axle's slip angle the plan had. The request goes to a_req in the
+    zone (None: kept)."""
+    N = X.shape[1]
+    s, kap = t.s[:N], t.kappa[:N]
+    vx, vy, r, n, xi, delta = (np.array(X[i], float) for i in range(6))
+    v = np.hypot(vx, vy)
+    beta0 = np.arctan2(vy, vx)
+    chi = xi + beta0
+    front0 = np.arctan2(vy + car.lf * r, vx) - delta
+    ar0 = np.arctan2(vy - car.lr * r, vx)
+    goal = ar0 + w * (target - ar0)
+    beta = beta0.copy()
+    on = w > 0
+    for _ in range(60):
+        xin = chi - beta
+        sdot = v * np.cos(chi) / (1 - n * kap)
+        rn = sdot * (np.gradient(xin, s) + kap)
+        ar = np.arctan2(v * np.sin(beta) - car.lr * rn, v * np.cos(beta))
+        beta = np.where(on, np.clip(beta + 0.4 * (goal - ar), -0.9, 0.9), beta0)
+    xin = chi - beta
+    rn = np.where(on, v * np.cos(chi) / (1 - n * kap) * (np.gradient(xin, s) + kap), r)
+    vxn, vyn = v * np.cos(beta), v * np.sin(beta)
+    dn = np.clip(np.arctan2(vyn + car.lf * rn, vxn) - front0, -car.steer_max, car.steer_max)
+    dn = np.where(on, dn, delta)
+    Xn = np.vstack([vxn, vyn, rn, n, np.where(on, xin, xi), dn])
+    Xn[:, 0] = X[:, 0]
+    return Xn, _consistent_u(Xn, U, t, car, w, a_req)
+
+
+def seed_rear_out(X, U, t, s_in, s_out, car, peak, mu):
+    """Ds: the rear SEED_PAST past its peak from D_FROM before turn-in to the apex (ramped in
+    over 5 m, out over 10), braking on low friction, coasting on asphalt."""
+    s = t.s[:X.shape[1]]
+    sgn = np.sign(t.kappa.sum()) or 1.0
+    apex = 0.5 * (s_in + s_out)
+    w = _zone(s, s_in - D_FROM, apex, 5.0, 10.0)
+    target = -sgn * (peak + SEED_PAST) * np.ones_like(s)
+    return reshape_slip(X, U, t, car, target, w, D_BRAKE if mu < 0.7 else 0.0)
+
+
+def seed_flick(X, U, t, s_in, s_out, car, peak, mu):
+    """F: the rear out the other way first (FLICK_PAST past the peak, 35 to 18 m before
+    turn-in), then as Ds from 10 m before turn-in to the apex."""
+    s = t.s[:X.shape[1]]
+    sgn = np.sign(t.kappa.sum()) or 1.0
+    apex = 0.5 * (s_in + s_out)
+    w1 = _zone(s, s_in - 35.0, s_in - 18.0, 4.0, 4.0)
+    w2 = _zone(s, s_in - 10.0, apex, 4.0, 10.0)
+    target = np.where(w1 > w2, sgn * (peak + FLICK_PAST), -sgn * (peak + SEED_PAST))
+    return reshape_slip(X, U, t, car, target, np.maximum(w1, w2),
+                        D_BRAKE if mu < 0.7 else 0.0)
+
+
+def seed_perturbed(X, U, t, car, k):
+    """P1-P3: smooth noise (a 12 m running mean of Gaussian noise, the window's start kept) on
+    every state: 3 % of the speed, 0.3 m/s sideways, 0.03 rad/s of yaw, 0.3 m of offset, 0.02
+    rad of heading and 0.01 of steer."""
+    rng = np.random.default_rng(1000 + k)
+    N = X.shape[1]
+    ds = float(t.s[1] - t.s[0])
+    m = max(1, int(round(12.0 / ds)))
+    sm = lambda: np.convolve(rng.standard_normal(N + m), np.ones(m) / m * math.sqrt(m),
+                             "same")[:N]
+    Xp = np.array(X, float).copy()
+    Xp[0] *= 1 + 0.03 * sm()
+    for i, a in ((1, 0.3), (2, 0.03), (3, 0.3), (4, 0.02), (5, 0.01)):
+        Xp[i] += a * sm()
+    Xp[5] = np.clip(Xp[5], -car.steer_max, car.steer_max)
+    Xp[:, 0] = X[:, 0]
+    w = np.ones(N)
+    return Xp, _consistent_u(Xp, U, t, car, w, None)
+
+
+def _ms_metrics(p, t, s_in, s_out, s_time, car, peak):
+    """What a solve did: its time at s_time, the rear axle's largest slip in the corner past the
+    tyre's peak (deg), the largest sideslip (deg), how far past the road's edge it went."""
+    X, s = p["X"], p["s"]
+    sel = (s >= s_in - D_FROM - 10) & (s <= s_out + 20)
+    a_r = np.degrees(np.arctan2(X[1] - car.lr * X[2], np.maximum(X[0], 0.1)))
+    edge = max(0.0, float(np.max(np.abs(X[3]) - (HALF_WIDTH - 0.5 * car.width - 0.3))))
+    return {"t": float(np.interp(s_time, s, p["t"])), "status": p["status"],
+            "good": bool(good(dict(p, edge=edge))), "ok": bool(p["ok"]) and edge < 0.05,
+            "iters": int(p["iters"]), "solve_s": float(p["solve_s"]),
+            "past": float(np.abs(a_r[sel]).max()) - math.degrees(peak),
+            "beta": float(np.degrees(np.abs(np.arctan2(X[1], X[0])[sel]).max())),
+            "edge": edge, "defect": float(p["defect"]), "violation": float(p["violation"])}
+
+
+def _ms_solve(w, t, x0, v_end, X, U, keep_lam=False):
+    X = np.array(X, float)
+    X[:, 0] = x0
+    if not keep_lam:
+        w.lam = w.lam_x = None
+    return w.solve(t, 0, x0, v_end, X, U)
+
+
+def _stored(setting_from, mu, sliding, R, theta, name):
+    """A plan of the study-setting grid (`multistart`): the start `name`'s for this case, as
+    (s, X, U); None if that grid has not been run or has no such plan."""
+    import json
+    key = ("_stored", setting_from)
+    if key not in _MS_WINDOWS:
+        idx, data = {}, None
+        try:
+            with open(os.path.join(MS_OUT, f"{setting_from}.jsonl")) as f:
+                for i, line in enumerate(f):
+                    r = json.loads(line)
+                    if "error" not in r:
+                        idx[(r["mu"], r["sliding"], r["R"], round(r["theta"], 4))] = i
+            data = np.load(os.path.join(MS_OUT, f"{setting_from}.npz"))
+        except OSError:
+            pass
+        _MS_WINDOWS[key] = (idx, data)
+    idx, data = _MS_WINDOWS[key]
+    i = idx.get((mu, sliding, R, round(theta, 4)))
+    if i is None or f"{i}/{name}_X" not in data:
+        return None
+    return data[f"{i}/s"], data[f"{i}/{name}_X"], data[f"{i}/{name}_U"]
+
+
+def _resample(s_from, X, U, s_to):
+    """Plan (X over s_from, U over its intervals) on the grid s_to."""
+    Xn = np.array([np.interp(s_to, s_from, x) for x in X])
+    Un = np.array([np.interp(s_to[:-1], s_from[:-1], u) for u in U])
+    return Xn, Un
+
+
+def ms_case(setting, R, theta, mu, sliding, linsol="mumps"):
+    """One case from every start (SEEDS) at a setting; returns (record, arrays).
+
+    At the live setting every start is one solve under the budget, as a re-plan would be; the
+    grip plan G starts from (the held plan) is solved without one, as live.Driver's first plan
+    is (its re-plans then keep it shifted), and so are the held plans and Cnb (C without a
+    budget, for the oracle only). Dc is the study setting's continuation plan resampled onto the
+    live grid: a continuation chain is offline work (each step a solve), so live it can only be
+    a stored plan, here the case's own (an archetype that matches exactly: the best a library of
+    corners could do)."""
+    from race_planner.window import initial
+    from race_planner.line import min_curvature_line
+    from race_planner.qss import speed_profile
+    o = SETTINGS[setting]
+    live = setting != "study"
+    t, s_in, s_out = section(R, theta, mu, sliding, ds=o["ds"])
+    car = make_car()
+    v0 = v_start(R, mu)
+    x0 = np.array([v0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    peak = rear_peak(mu, sliding)
+    held = {"rear_alpha_max": round(peak + REAR_MARGIN, 4)}
+    wf = ms_window(setting, None, linsol)
+    wh = ms_window(setting, held, linsol, budget=False)
+    if not live:
+        v_end, s_time = 1e3, s_out + EXIT_TIMED
+    else:                              # the live loop's: the quasi-steady ceiling at the end
+        line, _ = min_curvature_line(t, 0.5 * car.width, 0.3)
+        v_end = float(np.interp(o["length"], t.s, speed_profile(line, car)))
+        s_time = min(s_out + EXIT_TIMED, LIVE_TIMED)
+    sec = wf.section(t, 0)
+    X0, U0 = initial(sec, car, wf.margin, v0)
+    rec = {"setting": setting, "linsol": linsol, "R": R, "theta": theta, "mu": mu,
+           "sliding": sliding, "v0": v0, "peak": math.degrees(peak), "s_time": s_time,
+           "seeds": {}, "held": {}}
+    arrays = {"s": sec.s}
+    m = lambda p: _ms_metrics(p, t, s_in, s_out, s_time, car, peak)
+
+    def keep(name, p):
+        arrays[f"{name}_X"], arrays[f"{name}_U"], arrays[f"{name}_t"] = p["X"], p["U"], p["t"]
+
+    h0 = _ms_solve(wh, t, x0, v_end, X0, U0)
+    rec["held"]["H0"] = m(h0)
+    keep("H0", h0)
+    starts = {"C": (X0, U0)}
+    if h0["ok"]:
+        Xb, Ub = h0["X"], h0["U"]
+        starts["G"] = (Xb, Ub)
+        starts["Ds"] = seed_rear_out(Xb, Ub, sec, s_in, s_out, car, peak, mu)
+        starts["F"] = seed_flick(Xb, Ub, sec, s_in, s_out, car, peak, mu)
+        for k in (1, 2, 3):
+            starts[f"P{k}"] = seed_perturbed(Xb, Ub, sec, car, k)
+    if live:
+        st = _stored("multistart", mu, sliding, R, theta, "Dc")
+        if st is None and sliding >= 1.0:
+            st = _stored("multistart", mu, sliding, R, theta, "C")
+        if st is not None:
+            starts["Dc"] = _resample(st[0], st[1], st[2], sec.s)
+    for name in ("C", "G", "Ds", "Dc", "F", "P1", "P2", "P3"):
+        if name not in starts or (name == "Dc" and not live):
+            continue
+        p = _ms_solve(wf, t, x0, v_end, *starts[name])
+        rec["seeds"][name] = m(p)
+        keep(name, p)
+        if name in ("Ds", "F"):
+            arrays[f"{name}_seed_X"] = starts[name][0]
+    if live:                           # the oracle's own: C without the budget
+        wn = ms_window(setting, None, linsol, budget=False)
+        p = _ms_solve(wn, t, x0, v_end, X0, U0)
+        rec["seeds"]["Cnb"] = m(p)
+        keep("Cnb", p)
+        # and what the mode seeds need without one (their time is the budget's question)
+        rec["nobudget"] = {}
+        for name in ("G", "Ds", "Dc", "F"):
+            if name in starts:
+                rec["nobudget"][name] = m(_ms_solve(wn, t, x0, v_end, *starts[name]))
+    elif sliding >= 1.0:               # Dc: on no fall-off it is C
+        rec["seeds"]["Dc"] = dict(rec["seeds"]["C"], steps=1, degenerate=True)
+        keep("Dc", {"X": arrays["C_X"], "U": arrays["C_U"], "t": arrays["C_t"]})
+    else:                              # no fall-off first, then the surface's, each from the last
+        X, U, its, wall = X0, U0, 0, 0.0
+        steps = [x for x in CONT_STEPS if x > sliding + 1e-9] + [sliding]
+        for j, sl in enumerate(steps):
+            tk = dataclasses.replace(t, sliding=sl * np.ones_like(t.sliding))
+            p = _ms_solve(wf, tk, x0, v_end, X, U, keep_lam=j > 0)
+            its, wall = its + p["iters"], wall + p["solve_s"]
+            if not p["ok"] and j < len(steps) - 1:
+                break
+            X, U = p["X"], p["U"]
+        r = m(p)
+        r.update(iters=its, solve_s=wall, steps=j + 1, degenerate=False,
+                 reached=bool(abs(steps[j] - sliding) < 1e-9))
+        if not r["reached"]:
+            r.update(good=False, ok=False)
+        rec["seeds"]["Dc"] = r
+        keep("Dc", p)
+    # the held plan again, from the best free plan clipped into the bound
+    ok = {k: v for k, v in rec["seeds"].items() if v["good"]}
+    if ok:
+        best = min(ok, key=lambda k: ok[k]["t"])
+        h1 = _ms_solve(wh, t, x0, v_end, _clip_slip(arrays[f"{best}_X"], held, car),
+                       arrays[f"{best}_U"])
+        rec["held"]["H1"] = m(h1)
+        keep("H1", h1)
+    return rec, arrays
+
+
+def ms_grid(name):
+    """The cases: every mu 0.45 and mu 0.3 corner of the study (3 slidings, 5 radii, 90 and 180
+    deg), and every 180 deg asphalt hairpin (mu 1.12, sliding 0.8 and 1.0, 5 radii); grouped by
+    surface so a worker's held windows are shared."""
+    setting, linsol = {"multistart": ("study", "mumps"), "multistart-live": ("live", "mumps"),
+                       "multistart-live-warm": ("live_warm", "mumps"),
+                       "e0b": ("live", "pair")}[name]
+    cases = [(mu, sl, R, th) for mu in (0.45, 0.3) for sl in SLIDINGS for R in RADII
+             for th in THETAS]
+    cases += [(1.12, sl, R, math.pi) for sl in (0.8, 1.0) for R in RADII]
+    only = os.environ.get("MS_ONLY")              # e.g. "0.45" or "0.45,1.0": a subset
+    if only:
+        f = [float(x) for x in only.split(",")]
+        cases = [c for c in cases if c[0] == f[0] and (len(f) < 2 or c[1] == f[1])]
+    return [(setting, R, th, mu, sl, linsol) for mu, sl, R, th in cases]
+
+
+def ms_run(args):
+    """One case; with linsol "pair" (E0b) twice in the same worker, on MUMPS and on SPRAL, in
+    an order that alternates by case (the host's load drifts): SPRAL's record, MUMPS's in it as
+    "pair"."""
+    c = time.time()
+    try:
+        if args[-1] == "pair":
+            first = ("mumps", "spral") if hash(args[1:5]) % 2 else ("spral", "mumps")
+            got = {ls: ms_case(*args[:-1], ls) for ls in first}
+            rec, arrays = got["spral"]
+            rec["pair"] = got["mumps"][0]
+            rec["order"] = first
+        else:
+            rec, arrays = ms_case(*args)
+    except Exception as e:
+        import traceback
+        return {"args": repr(args), "error": repr(e), "trace": traceback.format_exc()}, None
+    rec["wall_s"] = time.time() - c
+    return rec, arrays
+
+
+def ms_main(name, jobs):
+    """Run a multistart grid: <name>.jsonl (one record a case, every start's solve in it) and
+    <name>.npz (every plan) under MS_OUT."""
+    import json
+    os.makedirs(MS_OUT, exist_ok=True)
+    cases = ms_grid(name)
+    arrays = {}
+    with open(os.path.join(MS_OUT, f"{name}.jsonl"), "w") as f, ProcessPoolExecutor(jobs) as ex:
+        for i, (rec, keep) in enumerate(ex.map(ms_run, cases, chunksize=5)):
+            f.write(json.dumps(rec) + "\n")
+            f.flush()
+            if keep is None:
+                print(i, rec, flush=True)
+                continue
+            sd = rec["seeds"]
+            print(i, rec["mu"], rec["sliding"], rec["R"], round(math.degrees(rec["theta"])),
+                  {k: (round(v["t"], 3), v["good"], v["iters"], round(v["solve_s"], 2),
+                       round(v["past"], 1)) for k, v in sd.items()},
+                  {k: (round(v["t"], 3), v["good"]) for k, v in rec["held"].items()},
+                  round(rec["wall_s"]), flush=True)
+            arrays.update({f"{i}/{k}": v for k, v in keep.items()})
+    np.savez_compressed(os.path.join(MS_OUT, f"{name}.npz"), **arrays)
+
+
+SEED_SETS = (("C",), ("G",), ("G", "Ds"), ("G", "Dc"), ("G", "Ds", "Dc"), ("G", "Ds", "F"),
+             ("G", "Dc", "F"), ("G", "Ds", "Dc", "F"))
+
+
+def _ms_load(name):
+    import json
+    path = os.path.join(MS_OUT, f"{name}.jsonl")
+    if not os.path.exists(path):
+        return []
+    return [r for r in map(json.loads, open(path)) if "error" not in r]
+
+
+def _usable(v, live):
+    """A start's plan counts: converged and feasible (good) at the study's settings; what the
+    live loop would adopt (feasible within the budget, on the road) at the live ones."""
+    return v["ok"] if live else v["good"]
+
+
+def ms_noise(recs, live):
+    """Each case's spread over G and its perturbed starts that stay in G's valley (the rear
+    within 2 deg of G's past its peak): the solver's own noise, without a change of valley."""
+    out = []
+    for r in recs:
+        sd = r["seeds"]
+        if "G" not in sd or not _usable(sd["G"], live):
+            continue
+        ts = [sd["G"]["t"]] + [sd[k]["t"] for k in ("P1", "P2", "P3")
+                               if k in sd and _usable(sd[k], live)
+                               and abs(sd[k]["past"] - sd["G"]["past"]) < 2.0]
+        if len(ts) > 1:
+            out.append((max(ts) - min(ts), 100 * (max(ts) - min(ts)) / min(ts)))
+    return np.array(out)
+
+
+def ms_classify(r, live, thr_pct, seeds=None):
+    """The case against its oracle (the best usable plan of all starts, or of `seeds`): oracle
+    time, its rear past its peak, the grip (held) time, the gain, and the label: drift (the best
+    plan's rear >= REAR_PAST past its peak, and faster than grip by more than the noise), grip,
+    or undecided (rear past its peak but the gain within the noise)."""
+    sd = r["seeds"]
+    names = [k for k in sd if (seeds is None or k in seeds) and _usable(sd[k], live)]
+    held = [v["t"] for v in r["held"].values() if v["good"]]
+    if not names:
+        return None
+    best = min(names, key=lambda k: sd[k]["t"])
+    t_o, past = sd[best]["t"], sd[best]["past"]
+    out = {"best": best, "t": t_o, "past": past}
+    if held:
+        th = min(held)
+        thr = max(2e-3, thr_pct / 100 * t_o)
+        gain = th - t_o
+        out.update(t_held=th, gain=gain, gain_pct=100 * gain / t_o, thr=thr,
+                   label=("drift" if past >= REAR_PAST and gain > thr else
+                          "undecided" if past >= REAR_PAST and gain > -thr else "grip"))
+    return out
+
+
+def _pct(a, q):
+    return float(np.percentile(a, q)) if len(a) else float("nan")
+
+
+NOISE_Q = (50, 75, 90)              # the noise floor's quantiles reported; M3's: NOISE_Q_USE
+NOISE_Q_USE = 75
+
+
+def ms_floor(recs, live, q):
+    """The noise floor per friction (mu -> % of the section's time): the q-th percentile of the
+    perturbed spread (ms_noise) over that friction's cases."""
+    out = {}
+    for mu in sorted({r["mu"] for r in recs}):
+        nz = ms_noise([r for r in recs if r["mu"] == mu], live)
+        out[mu] = _pct(nz[:, 1], q) if len(nz) else 0.0
+    return out
+
+
+IT_BUDGETS = (150, 225, 300)       # iterations: 0.6, 0.9, 1.2 s at the quiet core's 4 ms each
+
+
+def ms_iter_coverage(recs, floor, say):
+    """Live coverage by iterations, not by this host's wall clock: each mode seed's solve
+    without the budget (rec["nobudget"]) counts if it converged within an iteration budget
+    (IT_BUDGETS; the wall time a quiet core takes for them is ms_report's calibration); the
+    oracle is the best converged plan of every start, with and without the budget. `floor`:
+    the noise floor per friction (the study setting's: the live perturbed solves are cut by the
+    budget, their spread is the cut's, not the solver's)."""
+    for nit in IT_BUDGETS:
+        say(f"\n#### live coverage within {nit} iterations (study noise floor p{NOISE_Q_USE})\n")
+        say("| seed set | reaches the oracle (drift cases) | share | mu 0.45 undecided |"
+            "\n|---|---|---|---|")
+        sets = (("G",), ("G", "Ds"), ("G", "Dc"), ("G", "F"), ("G", "Ds", "Dc"), ("G", "Ds", "F"),
+                ("G", "Dc", "F"), ("G", "Ds", "Dc", "F"))
+        pseudo = []
+        for r in recs:
+            sd = {}
+            for k, v in r.get("nobudget", {}).items():
+                sd[k] = dict(v, ok=v["good"] and v["iters"] <= nit)
+            sd["all"] = dict(min((v for v in list(r.get("nobudget", {}).values())
+                                  + list(r["seeds"].values()) if v["ok"]),
+                                 key=lambda v: v["t"], default={"t": 1e9, "ok": False,
+                                                                "past": 0.0}))
+            pseudo.append(dict(r, seeds=sd))
+        lab = {id(r): ms_classify(r, True, floor[r["mu"]], ("all",)) for r in pseudo}
+        drift = [r for r in pseudo if (lab[id(r)] or {}).get("label") == "drift"]
+        for ss in sets:
+            def hit(r):
+                c, o = ms_classify(r, True, floor[r["mu"]], ss), lab[id(r)]
+                return bool(c and o and "thr" in o and c["t"] - o["t"] <= o["thr"])
+            h = sum(hit(r) for r in drift)
+            und = sum(1 for r in pseudo if r["mu"] == 0.45 and (ms_classify(
+                r, True, floor[r["mu"]], ss) or {}).get("label") == "undecided")
+            say(f"| {{{','.join(ss)}}} | {h}/{len(drift)} | {100 * h / max(1, len(drift)):.0f} % "
+                f"| {und}/30 |")
+        und_o = sum(1 for r in pseudo if r["mu"] == 0.45
+                    and (lab[id(r)] or {}).get("label") == "undecided")
+        say(f"\noracle's labels: drift {len(drift)}, mu 0.45 undecided {und_o}/30")
+
+
+def ms_report():
+    """The tables of docs/mode-choice-m1.md, from the multistart grids under MS_OUT: the noise
+    floor, the oracle's labels, each seed set's coverage of the drift-optimal cases, the mu 0.45
+    cases the study left undecided, every start's iterations and wall time at the live setting,
+    and the linear solvers against each other (E0b). Printed, and written to MS_OUT/report.md.
+
+    A case's threshold is its friction's noise floor (ms_floor) times its oracle time, at least
+    2 ms (the study's floor)."""
+    lines = []
+    say = lambda *a: lines.append(" ".join(str(x) for x in a))
+    study_rows = {}
+    try:                               # the study's own labels (grid rear)
+        for r in _rows("rear"):
+            study_rows[(float(r["mu"]), float(r["sliding"]), float(r["R"]),
+                        round(float(r["theta"]), 4))] = r
+    except OSError:
+        pass
+    grids = [g for g in ("multistart", "multistart-live", "multistart-live-warm")
+             if _ms_load(g)]
+    groups = (("mu 0.45", 0.45), ("mu 0.3", 0.3), ("asphalt hairpins", 1.12))
+    for g in grids:
+        recs, live = _ms_load(g), g != "multistart"
+        say(f"\n## {g}: {len(recs)} cases\n")
+        say("noise floor: the spread of G and its perturbed starts that stay in G's valley, % of "
+            "the section's time (ms)\n\n| friction | cases | p50 | p75 | p90 | max |\n"
+            "|---|---|---|---|---|---|")
+        for gname, mu in groups:
+            nz = ms_noise([r for r in recs if r["mu"] == mu], live)
+            if len(nz):
+                say(f"| {gname} | {len(nz)} | " + " | ".join(
+                    f"{_pct(nz[:, 1], q):.3f} ({_pct(nz[:, 0], q) * 1e3:.0f})"
+                    for q in (50, 75, 90, 100)) + " |")
+        for q in NOISE_Q:
+            fl = ms_floor(recs, live, q)
+            lab = {id(r): ms_classify(r, live, fl[r["mu"]]) for r in recs}
+            drift = [r for r in recs if (lab[id(r)] or {}).get("label") == "drift"]
+            say(f"\n### threshold: the noise floor's p{q} ("
+                + ", ".join(f"mu {mu} {fl[mu]:.3f} %" for mu in fl) + ")\n")
+            say("| friction | cases | drift | grip | undecided | no plan |\n|---|---|---|---|---|---|")
+            for gname, mu in groups:
+                ls = [lab[id(r)] for r in recs if r["mu"] == mu]
+                cnt = lambda x: sum(1 for l in ls if l and l.get("label") == x)
+                say(f"| {gname} | {len(ls)} | {cnt('drift')} | {cnt('grip')} | "
+                    f"{cnt('undecided')} | {sum(1 for l in ls if not l or 'label' not in l)} |")
+            say(f"\n| seed set | reaches the oracle, {len(drift)} drift cases | share | all cases "
+                "| mu 0.45 undecided |\n|---|---|---|---|---|")
+            for ss in SEED_SETS:
+                def hit(r):
+                    c, o = ms_classify(r, live, fl[r["mu"]], ss), lab[id(r)]
+                    return bool(c and o and "thr" in o and c["t"] - o["t"] <= o["thr"])
+                h = sum(hit(r) for r in drift)
+                und = sum(1 for r in recs if r["mu"] == 0.45 and (ms_classify(
+                    r, live, fl[r["mu"]], ss) or {}).get("label") == "undecided")
+                say(f"| {{{','.join(ss)}}} | {h}/{len(drift)} | {100 * h / max(1, len(drift)):.0f}"
+                    f" % | {sum(hit(r) for r in recs)}/{len(recs)} | {und}/30 |")
+            if q != NOISE_Q_USE:
+                continue
+            say("\nwhich start is the oracle: " + ", ".join(
+                f"{k} {sum(1 for r in recs if lab[id(r)] and lab[id(r)]['best'] == k)}"
+                for k in SEEDS + ("Cnb",)))
+            say("\n| mu 0.45 case | study | study gain/noise (s) | oracle start | past (deg) | "
+                "gain (s) | thr (s) | label |\n|---|---|---|---|---|---|---|---|")
+            for r in sorted((r for r in recs if r["mu"] == 0.45),
+                            key=lambda r: (-r["sliding"], r["theta"], r["R"])):
+                o = lab[id(r)] or {}
+                sr = study_rows.get((r["mu"], r["sliding"], r["R"], round(r["theta"], 4)), {})
+                st = ("drift" if sr.get("drift_rear") == "True" else
+                      "undecided" if _num(sr, "rear_past") >= REAR_PAST and _num(sr, "dt") <=
+                      _num(sr, "noise") else "grip") if sr else "-"
+                say(f"| sl {r['sliding']} R {r['R']:.0f} {math.degrees(r['theta']):.0f} deg | "
+                    f"{st} | {_num(sr, 'dt'):.3f}/{_num(sr, 'noise'):.3f} | {o.get('best')} | "
+                    f"{o.get('past', float('nan')):.1f} | {o.get('gain', float('nan')):.3f} | "
+                    f"{o.get('thr', float('nan')):.3f} | {o.get('label')} |")
+        if live and any(r.get("nobudget") for r in recs):
+            ms_iter_coverage(recs, ms_floor(_ms_load("multistart"), False, NOISE_Q_USE)
+                             if _ms_load("multistart") else ms_floor(recs, live, NOISE_Q_USE), say)
+        # per start: iterations and wall time
+        say("\n| start | usable | iters p50/p95 | wall p50 | p95 | p99 | max | <= 0.9 s | ms/iter "
+            "p50 |\n|---|---|---|---|---|---|---|---|---|")
+        rowsets = [(k, [r["seeds"][k] for r in recs if k in r["seeds"]
+                        and not r["seeds"][k].get("degenerate")], False) for k in SEEDS + ("Cnb",)]
+        rowsets += [(k + ", no budget", [r["nobudget"][k] for r in recs
+                                         if k in r.get("nobudget", {})], True)
+                    for k in ("G", "Ds", "Dc", "F")]
+        for k, v, nb in rowsets:
+            if not v:
+                continue
+            w = np.array([x["solve_s"] for x in v])
+            it = np.array([x["iters"] for x in v])
+            use = sum((x["good"] if nb else _usable(x, live)) for x in v)
+            say(f"| {k} | {use}/{len(v)} | {_pct(it, 50):.0f}/{_pct(it, 95):.0f} | "
+                f"{_pct(w, 50):.2f} | {_pct(w, 95):.2f} | {_pct(w, 99):.2f} | {w.max():.2f} | "
+                f"{100 * np.mean(w <= 0.9):.0f} % | {1e3 * _pct(w / np.maximum(it, 1), 50):.1f} |")
+    # the linear solvers: the same live solves
+    b = _ms_load("e0b")                 # the pairs: SPRAL's records, MUMPS's in them
+    a = [r["pair"] for r in b]
+    if a and b:
+        bk = {(r["mu"], r["sliding"], r["R"], round(r["theta"], 4)): r for r in b}
+        say("\n## linear solver: MUMPS against SPRAL, the same live solves\n")
+        say("| start | MUMPS p50/p95/p99 (s) | SPRAL p50/p95/p99 (s) | iters MUMPS/SPRAL p50 | "
+            "same plan (|dt| < 1 ms) |\n|---|---|---|---|---|")
+        for k in SEEDS + ("Cnb",):
+            pa, pb, same, n = [], [], 0, 0
+            for r in a:
+                q = bk.get((r["mu"], r["sliding"], r["R"], round(r["theta"], 4)))
+                if not q or k not in r["seeds"] or k not in q["seeds"]:
+                    continue
+                pa.append((r["seeds"][k]["solve_s"], r["seeds"][k]["iters"]))
+                pb.append((q["seeds"][k]["solve_s"], q["seeds"][k]["iters"]))
+                if _usable(r["seeds"][k], True) and _usable(q["seeds"][k], True):
+                    n += 1
+                    same += abs(r["seeds"][k]["t"] - q["seeds"][k]["t"]) < 1e-3
+            if not pa:
+                continue
+            pa, pb = np.array(pa), np.array(pb)
+            say(f"| {k} | " + " | ".join("/".join(f"{_pct(x[:, 0], q):.2f}" for q in (50, 95, 99))
+                                       for x in (pa, pb))
+                + f" | {_pct(pa[:, 1], 50):.0f}/{_pct(pb[:, 1], 50):.0f} | {same}/{n} |")
+        allw = lambda recs: np.array([v["solve_s"] for r in recs for k, v in r["seeds"].items()
+                                      if k != "Cnb" and not v.get("degenerate")])
+        wa, wb = allw(a), allw(b)
+        say(f"\nall budgeted starts: MUMPS p50 {_pct(wa, 50):.3f} p95 {_pct(wa, 95):.3f} p99 "
+            f"{_pct(wa, 99):.3f}; SPRAL p50 {_pct(wb, 50):.3f} p95 {_pct(wb, 95):.3f} p99 "
+            f"{_pct(wb, 99):.3f}; p95 change {100 * (_pct(wb, 95) / _pct(wa, 95) - 1):+.0f} %")
+    text = "\n".join(lines)
+    print(text)
+    with open(os.path.join(MS_OUT, "report.md"), "w") as f:
+        f.write(text + "\n")
+
+
 def run(job):
     kind, args = job
     c = time.time()
@@ -517,10 +1163,17 @@ def main():
         return report()
     if sys.argv[1:] == ["deep-report"]:
         return deep_report()
+    if sys.argv[1:] == ["multistart-report"]:
+        return ms_report()
     ap = argparse.ArgumentParser()
     ap.add_argument("grid")
     ap.add_argument("--jobs", type=int, default=6)
     a = ap.parse_args()
+    if a.grid.startswith("multistart") or a.grid == "e0b":
+        # one thread a solve (MUMPS, SPRAL): the wall times are one core's, as live
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("OMP_CANCELLATION", "TRUE")      # SPRAL asks for it
+        return ms_main(a.grid, a.jobs)
     os.makedirs(OUT, exist_ok=True)
     jobs = list(grid(a.grid))
     path = os.path.join(OUT, f"{a.grid}.csv")
