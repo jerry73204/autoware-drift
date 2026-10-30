@@ -37,6 +37,7 @@ import time
 import numpy as np
 
 from race_planner import modes
+from race_planner.track import TYRE_FIELDS
 
 THRESHOLD = 0.003     # of the window's time: M1's noise floor (the live p75 on mu 0.45)
 CONFIRM = 2           # re-plans in a row
@@ -130,7 +131,8 @@ class MultiStart:
         N = plan["X"].shape[1]
         sl = slice(i0, i0 + N)
         mu_eff = self.grip * self.track.mu[sl] * (1.0 if mu is None else np.asarray(mu)[:N])
-        past = modes.past_peak(self.car, plan["X"], mu_eff, self.track.sliding[sl])
+        past = modes.past_peak(self.car, plan["X"], mu_eff, self.track.sliding[sl],
+                               np.vstack([getattr(self.track, k)[sl] for k in TYRE_FIELDS]))
         s = plan["s"] - plan["s"][0]
         hit = (past >= modes.REAR_PAST) & (s >= EXCLUDE)
         if corner is not None:
@@ -160,12 +162,12 @@ class MultiStart:
             return None, None
         X, U = base
         if slot == "F":
-            peak = modes.rear_peak(self.car, c.mu, c.sliding)
+            peak = modes.rear_peak(self.car, c.mu, c.sliding, c.surface)
             return "F", modes.seed_flick(X, U, sec, c.s_in, c.s_out, self.car, peak, c.mu, c.sign)
         i = self.library.nearest(c) if self.library is not None else None
         if i is not None:
             return "Dc", self.library.seed(i, X, U, sec, c, self.car)
-        peak = modes.rear_peak(self.car, c.mu, c.sliding)
+        peak = modes.rear_peak(self.car, c.mu, c.sliding, c.surface)
         return "Ds", modes.seed_rear_out(X, U, sec, c.s_in, c.s_out, self.car, peak, c.mu, c.sign)
 
     def replan(self, d, i0, x0, v_end, mu):

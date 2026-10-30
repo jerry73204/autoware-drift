@@ -26,6 +26,8 @@ import os
 
 import numpy as np
 
+from race_planner.track import TYRE_FIELDS
+
 REAR_PAST = math.radians(3.0)      # a plan's rear axle this far past its tyre's peak slides
 SEED_PAST = math.radians(7.5)      # the rear-out seeds' rear axle past its tyre's peak
 FLICK_PAST = math.radians(5.0)     # the flick's first slide, the other way
@@ -41,25 +43,30 @@ LIBRARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corner_libra
 _PEAKS = {}
 
 
-def _rear_peak(car, mu, sliding):
-    key = (repr(car), mu, sliding)
+def _rear_peak(car, mu, sliding, surface=None):
+    key = (repr(car), mu, sliding, surface)
     if key in _PEAKS:
         return _PEAKS[key]
     from race_planner import model
     fz0 = model.rest_loads(car)[2]
     fz = (1.0 + 0.6 * mu) * fz0
     a = np.radians(np.linspace(0.05, 40.0, 800))
-    fy = np.array([-float(model.tyre(car, 0.0, math.tan(x), fz, fz0, mu, sliding)[1]) for x in a])
+    fy = np.array([-float(model.tyre(car, 0.0, math.tan(x), fz, fz0, mu, sliding, surface)[1])
+                   for x in a])
     _PEAKS[key] = float(a[int(np.argmax(fy >= 0.995 * fy.max()))])
     return _PEAKS[key]
 
 
-def rear_peak(car, mu, sliding):
+def rear_peak(car, mu, sliding, surface=None):
     """The rear tyre's peak slip angle (rad) in the planner's tyre (model.tyre, no longitudinal
     slip) at the outer rear wheel's load at the limit (1 + 0.6 mu rest loads: the lateral
     transfer at mu g): the smallest angle at which its lateral force is within 0.5 % of its
-    largest. mu is the planner's (grip times the road's). Cached on mu to 0.01, sliding to 0.05."""
-    return _rear_peak(car, round(float(mu), 2), round(float(sliding) * 20) / 20)
+    largest. mu is the planner's (grip times the road's); surface the road's tyre (model.tyre's;
+    None the rig's). Cached on mu to 0.01, sliding to 0.05, the surface's shares to 0.001."""
+    sf = None if surface is None else tuple(round(float(v), 3) for v in surface)
+    if sf == (1.0, 1.0, 1.0, 1.0):
+        sf = None                              # the rig's: one entry, today's numbers
+    return _rear_peak(car, round(float(mu), 2), round(float(sliding) * 20) / 20, sf)
 
 
 def rear_slip(car, X):
@@ -67,12 +74,14 @@ def rear_slip(car, X):
     return np.arctan2(X[1] - car.lr * X[2], np.maximum(X[0], 0.1))
 
 
-def past_peak(car, X, mu, sliding):
+def past_peak(car, X, mu, sliding, surface=None):
     """How far the rear axle runs past its tyre's peak at every node (rad; negative within it),
-    mu and sliding per node (the planner's mu: grip times the road's)."""
+    mu and sliding per node (the planner's mu: grip times the road's), surface the road's tyre
+    per node (4 x n, model.tyre's; None the rig's)."""
     n = X.shape[1]
     mu, sliding = np.broadcast_to(mu, n)[:n], np.broadcast_to(sliding, n)[:n]
-    peak = np.array([rear_peak(car, m, sl) for m, sl in zip(mu, sliding)])
+    sfs = [None] * n if surface is None else np.asarray(surface, float)[:, :n].T
+    peak = np.array([rear_peak(car, m, sl, sf) for m, sl, sf in zip(mu, sliding, sfs)])
     return np.abs(rear_slip(car, X)) - peak
 
 
@@ -175,6 +184,7 @@ class Corner:
     turn: float          # how far it turns, rad
     mu: float            # the planner's friction in it (grip times the road's, its lowest)
     sliding: float
+    surface: tuple = None  # the road's tyre at its lowest friction (model.tyre's; None the rig's)
 
     @property
     def hairpin(self):
@@ -211,8 +221,11 @@ def corners(track, grip=1.0):
         turn = abs(float(np.trapezoid(k[sl], s[sl]))) if j > i else 0.0
         if turn < CORNER_TURN:
             continue
+        lo = i + int(np.argmin(track.mu[sl]))
+        sf = tuple(float(getattr(track, f)[lo]) for f in TYRE_FIELDS)
         out.append(Corner(float(s[i]), float(s[j]), sg, float(1.0 / np.max(np.abs(k[sl]))), turn,
-                          grip * float(np.min(track.mu[sl])), float(np.min(track.sliding[sl]))))
+                          grip * float(np.min(track.mu[sl])), float(np.min(track.sliding[sl])),
+                          None if sf == (1.0, 1.0, 1.0, 1.0) else sf))
     return out
 
 
@@ -254,7 +267,7 @@ class Library:
         alpha = np.interp(sa, sr, self.alpha[i])          # a left turn's: negative in a slide
         n_a = np.interp(sa, sr, self.n[i])
         a_a = np.interp(sa, sr, self.a[i])
-        peak = rear_peak(car, c.mu, c.sliding)
+        peak = rear_peak(car, c.mu, c.sliding, c.surface)
         excess = np.abs(alpha) - peak_a
         mag = np.where(excess > 0, peak + excess, np.abs(alpha) * peak / peak_a)
         target = c.sign * np.sign(alpha) * mag

@@ -78,17 +78,20 @@ def brake_share(car, decel=0.0):
 _SLOPES = {}
 
 
-def _slope(car, fz0):
+def _slope(car, fz0, surface=False):
     """dFx/dkappa of PhysX's tyre (model.tyre) at a wheel of rest load fz0, as a function of
-    (kappa, tan alpha, fz, mu, sliding). A wheel whose force falls as its slip grows is unstable
+    (kappa, tan alpha, fz, mu, sliding), and of the surface's tyre (model.tyre's `surface`, four
+    more inputs) when `surface`. A wheel whose force falls as its slip grows is unstable
     without traction control or ABS: its spin runs away (sim.py's plant: a request whose rear
     force is just past the peak, a 6.0 on drift_mustang at 15 m/s with sliding 0.8, takes the slip
     from 0.27 to 0.54 in 1.5 s; 6.5 to 1.0 at once), so a plan must stay on the rising branch."""
-    key = (id(car), float(fz0))
+    key = (id(car), float(fz0), bool(surface))
     if key not in _SLOPES:
         k, ta, fz, mu, sl = (ca.SX.sym(n) for n in ("k", "ta", "fz", "mu", "sl"))
-        fx, _ = model.tyre(car, k, ta, fz, fz0, mu, sl)
-        _SLOPES[key] = ca.Function("tyre_slope", [k, ta, fz, mu, sl], [ca.jacobian(fx, k)])
+        sf = ca.SX.sym("surface", 4) if surface else None
+        fx, _ = model.tyre(car, k, ta, fz, fz0, mu, sl, sf)
+        _SLOPES[key] = ca.Function("tyre_slope", [k, ta, fz, mu, sl] + ([sf] if surface else []),
+                                   [ca.jacobian(fx, k)])
     return _SLOPES[key]
 
 
@@ -128,11 +131,12 @@ def brakes(car, a, vx):
     return drive, regen, B - rear, rear
 
 
-def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
+def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None, surface=None):
     """x = (vx, vy, r); u = (delta, a): the bicycle steering angle and the acceleration request;
     acc = (ax, ay) the loads are taken at (equal to the result in the planner); w_rear: the
     rear axle's peripheral speed (m/s), or None for the ellipse there (see above); w_front:
-    the front wheels' (left, right), or None for the ellipse on them.
+    the front wheels' (left, right), or None for the ellipse on them; surface: the road's tyre
+    (model.tyre's, the four wheels alike; None the rig's).
 
     Returns a dict: dx, acc, fz, fx and fy (each wheel's, wheel frame), use (each wheel's
     |Fx| / (mu Fz): <= 1 for the force to be carried), drive and brake (the tyre force the
@@ -173,9 +177,11 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
         w_own = (w_rear if i >= 2 else None if w_front is None else w_front[i])
         if w_own is not None:                          # PhysX's tyre, combined slip
             kap = (w_own - lx) / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LONG_OFFSET)
-            fx[i], fy = model.tyre(car, kap, tan_a, fz[i], fz0[i], mus[i], sls[i])
+            fx[i], fy = model.tyre(car, kap, tan_a, fz[i], fz0[i], mus[i], sls[i], surface)
             (kappas if i >= 2 else kappas_f).append(kap)
-            slopes.append(_slope(car, fz0[i])(kap, tan_a, fz[i], mus[i], sls[i]))
+            sf = [] if surface is None else [ca.vertcat(*(surface[j] for j in range(4)))]
+            slopes.append(_slope(car, fz0[i], surface is not None)(kap, tan_a, fz[i], mus[i],
+                                                                   sls[i], *sf))
             use = fx[i] / (mus[i] * ca.sqrt(fz[i] * fz[i] + 1.0))
             bx, by = c * fx[i] - s * fy, s * fx[i] + c * fy
             Fx, Fy = Fx + bx, Fy + by
@@ -183,7 +189,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None):
             for k, v in (("fx", fx[i]), ("fy", fy), ("use", use), ("alpha", tan_a)):
                 out[k].append(v)
             continue
-        _, fy0 = model.tyre(car, 0.0, tan_a, fz[i], fz0[i], mus[i], sls[i])
+        _, fy0 = model.tyre(car, 0.0, tan_a, fz[i], fz0[i], mus[i], sls[i], surface)
         cap = mus[i] * ca.sqrt(fz[i] * fz[i] + 1.0)
         use = fx[i] / cap
         # the ellipse's share left for Fy, smooth through the limit (a kink there stalls the

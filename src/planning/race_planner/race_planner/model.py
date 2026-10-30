@@ -15,9 +15,19 @@ of drift_mustang on dry asphalt: Fx/Fz rms 0.012, Fy/Fz rms 0.041 over 3800 whee
   asphalt 1.12 at tyre friction 1.0, as measured);
 - past the peak, swb's surface layer lowers mu with the combined slip rho = |(kappa / kappa_p,
   tan(alpha) / tan(alpha_p))| toward the class's `sliding` share: mu (sliding + (1 - sliding) /
-  rho), the peaks the rig's own (2.3 Fz0 / (0.9 C) in each direction, surface_layer.rig_peaks);
-  rho's knee at 1 is softened for the optimiser. (The layer also lags the drop over the class's
-  relaxation length, 0.5 m on asphalt; a steady model leaves that out.)
+  rho); rho's knee at 1 is softened for the optimiser. (The layer also lags the drop over the
+  class's relaxation length, 0.5 m on asphalt, and lowers `sliding` with the sliding speed on
+  ice, its Stribeck; a steady model leaves both out.)
+- each surface's own peak (roadmap 061 M2): a class may say where its tyre peaks, its
+  `peak_slip` and `peak_slip_angle`; with none the rig's own (2.3 Fz0 / (0.9 C) in each
+  direction times the tyre's friction, surface_layer.rig_peaks). swb's surface layer scales
+  each wheel's stiffness so PhysX's peak lands there (surfaces.WheelSurfaces.stiffness: the
+  rig's peak times the friction it writes over the class's peak), and takes rho over the
+  class's peaks. Here the same, as `surface` = (stiff_long, stiff_lat, peak_long, peak_lat):
+  the stiffnesses' and the peaks' shares of the rig's (track.SurfaceTable.tyre); None, the
+  rig's (all 1: dry asphalt, where swb writes the rig's own tyre). On a class with no peak of
+  its own and another mu (concrete) the stiffness scales with the friction, so the peak stays
+  where the rig's is, as swb's does.
 
 The body is planar, x forward, y left, yaw rate r; the wheels at (lf, +-track/2), (-lr, +-track/2);
 the front pair steered by Ackermann from the bicycle angle delta; the loads by the static split
@@ -57,16 +67,22 @@ KNEE = 30.0                                # the softened knee's sharpness (1 / 
 
 
 def peaks(car):
-    """The rig's peak slips at friction 1.0: (kappa_p, tan alpha_p), swb's rule."""
+    """The rig's peak slips at its tyre's friction: (kappa_p, tan alpha_p), swb's rule
+    (surface_layer.rig_peaks at friction 1.0, times the tyre's friction as
+    WheelSurfaces.class_peaks takes them for a class with none of its own)."""
     load = car.m * G / 4
-    return (PEAK_SPAN * load / (STIFFNESS_IN_USE * car.long_stiff_value * G),
-            PEAK_SPAN / (STIFFNESS_IN_USE * car.lat_stiff_value))
+    return (PEAK_SPAN * load / (STIFFNESS_IN_USE * car.long_stiff_value * G) * car.mu,
+            PEAK_SPAN / (STIFFNESS_IN_USE * car.lat_stiff_value) * car.mu)
 
 
-def tyre(car, kappa, tan_alpha, fz, fz0, mu, sliding=1.0):
+def tyre(car, kappa, tan_alpha, fz, fz0, mu, sliding=1.0, surface=None):
     """PhysX's tyre under swb's surface layer: (Fx, Fy) in the wheel's frame (Fy opposes the
-    slip angle)."""
+    slip angle). surface: (stiff_long, stiff_lat, peak_long, peak_lat), the surface's tyre as
+    shares of the rig's (numbers or symbols; None: the rig's own)."""
     kp, tp = peaks(car)
+    if surface is not None:
+        s_lon, s_lat, a_lon, a_lat = (surface[i] for i in range(4))
+        kp, tp = kp * a_lon, tp * a_lat
     rho = ca.sqrt((kappa / kp) ** 2 + (tan_alpha / tp) ** 2 + 1e-12)
     z = KNEE * (rho - 1.0)                 # softplus, in its overflow-free form
     rho = 1.0 + (ca.fmax(z, 0.0) + ca.log(1.0 + ca.exp(-ca.fabs(z)))) / KNEE
@@ -74,6 +90,8 @@ def tyre(car, kappa, tan_alpha, fz, fz0, mu, sliding=1.0):
     load = ca.fmin(3.0 * fz / (fz0 * car.lat_stiff_max_load), 3.0)
     c_lat = fz0 * car.lat_stiff_value * (load - load * load / 3.0 + load ** 3 / 27.0)
     c_lon = car.long_stiff_value * G
+    if surface is not None:
+        c_lon, c_lat = c_lon * s_lon, c_lat * s_lat
     sx, sy = c_lon * kappa, c_lat * tan_alpha
     K = ca.sqrt(sx * sx + sy * sy + 1e-9) / (mu * ca.fmax(fz, 1.0))
     q = _f1_over_k(K)
@@ -108,14 +126,15 @@ def loads(car, ax, ay):
             st[2] + dlon - dlat_r, st[3] + dlon + dlat_r]
 
 
-def dynamics(car, x, u, mu, acc, sliding=1.0):
+def dynamics(car, x, u, mu, acc, sliding=1.0, surface=None):
     """The body's accelerations and what the wheels need.
 
     x = (vx, vy, r): the body's velocity (m/s, m/s, rad/s).
     u = (delta, w_fl, w_fr, w_rl, w_rr): the bicycle steering angle and each wheel's peripheral
         speed (m/s; omega R).
     mu: the friction under the wheels (a number or four); sliding: its share past the peak (the
-        surface class's; a number or four).
+        surface class's; a number or four); surface: its tyre (see tyre; one for all four
+        wheels, None the rig's).
     acc = (ax, ay): the body's accelerations the loads are taken at (the minimum-time problem
         makes them variables equal to the result; a simulation takes the last step's).
 
@@ -140,7 +159,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0):
         speed = ca.sqrt(lx * lx + 1e-4)
         kappa = (w[i] - lx) / (speed + SLIP_LONG_OFFSET)
         tan_a = ly / (speed + SLIP_LAT_OFFSET)
-        fx, fy = tyre(car, kappa, tan_a, fz[i], fz0[i], mus[i], sls[i])
+        fx, fy = tyre(car, kappa, tan_a, fz[i], fz0[i], mus[i], sls[i], surface)
         bx, by = c * fx - s * fy, s * fx + c * fy         # back to the body
         Fx, Fy = Fx + bx, Fy + by
         Mz = Mz + px * by - py * bx

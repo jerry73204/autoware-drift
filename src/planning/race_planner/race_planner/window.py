@@ -38,6 +38,7 @@ import numpy as np
 
 from race_planner import axle, model
 from race_planner.ocp import STEER_RATE
+from race_planner.track import TYRE_FIELDS
 
 G = 9.81
 REG_STEER, REG_ACCEL = 1e-2, 1e-4
@@ -56,7 +57,10 @@ CACHE = os.environ.get("RACE_PLANNER_CACHE", os.path.expanduser("~/.cache/race_p
 BLEND = 10                              # nodes over which a warm start's tail joins the plan
 X_SCALE = np.array([20.0, 2.0, 1.0, 3.0, 0.3, 0.3])
 U_SCALE = np.array([1.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0])
-TRACK_FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")
+TRACK_FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade",
+                "sliding") + TYRE_FIELDS
+NP = 8                                  # a stage's parameters: kappa mu grade sliding, the
+# surface's tyre (stiff_long stiff_lat peak_long peak_lat, model.tyre's `surface`)
 ROWS = ("ax", "ay", "fz_fl", "fz_fr", "fz_rl", "fz_rr", "use_fl", "use_fr", "use_rl", "use_rr",
         "drive", "power", "brake_front", "brake_rear", "sdot", "rear_balance", "kappa_rl",
         "kappa_rr", "front_balance_l", "front_balance_r", "kappa_fl", "kappa_fr", "slope_fl",
@@ -148,13 +152,16 @@ def node_functions(car, tyres=False):
     (axle.py), with six more rows: the two rear tyres make the ECU's rear force and each front
     tyre its brake share (in the car's weight), and each wheel's slip ratio within KAPPA_MAX
     (past it PhysX's tyre is far into its slide; a plan has no business there; a front wheel,
-    which only brakes, not above FRONT_KAPPA_UP)."""
+    which only brakes, not above FRONT_KAPPA_UP).
+
+    p = (kappa, mu, grade, sliding, then the surface's tyre: model.tyre's four shares)."""
     nu = NU if tyres else 4
-    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", nu), ca.SX.sym("p", 4)   # kappa mu grade sliding
+    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", nu), ca.SX.sym("p", NP)
     vx, vy, r, n, xi, delta = (x[i] for i in range(6))
     kappa, mu, grade = p[0], p[1], p[2]
     o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [u[2], u[3]], p[3],
-                      w_rear=u[4] if tyres else None, w_front=(u[5], u[6]) if tyres else None)
+                      w_rear=u[4] if tyres else None, w_front=(u[5], u[6]) if tyres else None,
+                      surface=p[4:8])
     sin_t = grade / ca.sqrt(1 + grade * grade)
     dvx = o["dx"][0] - G * sin_t * ca.cos(xi)
     dvy = o["dx"][1] + G * sin_t * ca.sin(xi)
@@ -289,22 +296,22 @@ class Window:
         self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
         ng = len(lbg)
         # one stage in the scaled variables
-        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", NU), ca.SX.sym("p", 4)
+        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", NU), ca.SX.sym("p", NP)
         x, u = xs * X_SCALE, us * U_SCALE
         xn, dt = rk4(self.f, x, u, p, ds)
         stage = ca.Function("l1_stage", [xs, us, p], [xn / X_SCALE, dt, self.g(x, u, p)])
         # the decision vector stage by stage (x_k, u_k), then x_N
         # (x_k, u_k, e_k: how far node k is past the road's edge less the margin)
         W = ca.MX.sym("w", NZ * M + 6)
-        Pw = ca.MX.sym("p", 6, M)                # kappa mu grade sliding, the free width l, r
-        Pp = Pw[:4, :]
+        Pw = ca.MX.sym("p", NP + 2, M)           # the stage's (NP), the free width l, r
+        Pp = Pw[:NP, :]
         Z = ca.reshape(W[:NZ * M], NZ, M)
         Xk, Uk, Ek, xN = Z[:6, :], Z[6:6 + NU, :], Z[6 + NU, :], W[NZ * M:]
         xn_s, dts, G = stage.map(M)(Xk, Uk, Pp)
         n = Xk[3, :] * X_SCALE[3]
         sx = X_SCALE
         rows = ca.vertcat(xn_s - ca.horzcat(Xk[:, 1:], xN), G,     # each stage's, together
-                          n + Ek + Pw[5, :], n - Ek - Pw[4, :])
+                          n + Ek + Pw[NP + 1, :], n - Ek - Pw[NP, :])
         for c, tb in held:                       # vy - c r - tb vx <= 0 <= vy - c r + tb vx
             v = sx[1] * Xk[1, :] - c * sx[2] * Xk[2, :]
             rows = ca.vertcat(rows, v - tb * sx[0] * Xk[0, :], v + tb * sx[0] * Xk[0, :])
@@ -334,7 +341,7 @@ class Window:
         # the Lagrangian's Hessian by stages: CasADi's own, by colouring the whole map, took
         # 1.8 ms an iteration; each stage's own block is one pass of one stage
         lam_f, lam_g = ca.MX.sym("lam_f"), ca.MX.sym("lam_g", per * M + 2)
-        zs, ps, lf, lm = ca.SX.sym("z", NZ), ca.SX.sym("p", 4), ca.SX.sym("lf"), ca.SX.sym("l", 6 + ng)
+        zs, ps, lf, lm = ca.SX.sym("z", NZ), ca.SX.sym("p", NP), ca.SX.sym("lf"), ca.SX.sym("l", 6 + ng)
         o = stage(zs[:6], zs[6:6 + NU], ps)
         Hk, _ = ca.hessian(lf * o[1] + ca.dot(lm[:6], o[0]) + ca.dot(lm[6:], o[2]), zs)
         hs = ca.Function("l1_stage_hess", [zs, ps, lf, lm], [Hk])
@@ -420,8 +427,8 @@ class Window:
         friction times mu_scale (a number, or one per node; see friction_ahead)."""
         sl = slice(i0, i0 + self.N)
         mu = track.mu[sl] * (1.0 if mu_scale is None else np.asarray(mu_scale)[:len(track.mu[sl])])
-        P = np.vstack([track.kappa[sl], self.grip * mu, track.grade[sl],
-                       track.sliding[sl]])[:, :self.M]
+        P = np.vstack([track.kappa[sl], self.grip * mu, track.grade[sl], track.sliding[sl],
+                       *(getattr(track, k)[sl] for k in TYRE_FIELDS)])[:, :self.M]
         return P, track.w_left[sl], track.w_right[sl], track.s[sl]
 
     def solve(self, track, i0, x0, v_end, X_init, U_init, mu_scale=None):

@@ -17,9 +17,10 @@ import numpy as np
 
 from race_planner.car import Car
 from race_planner.ocp import solve_min_time
-from race_planner.track import SurfaceTable, Track
+from race_planner.track import TYRE_FIELDS, SurfaceTable, Track
 
-FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding")
+FIELDS = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade",
+          "sliding") + TYRE_FIELDS
 
 
 def section(track, s0, s1):

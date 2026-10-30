@@ -18,6 +18,10 @@ grip? The numbers come from `src/planning/race_planner/studies/drift_optimality.
    radii up to 60 m included. The gain is largest where the surface does not lose grip past the
    peak (sliding 1.0, mud and loose snow): 1.6-1.8 % (0.19-0.28 s) in 9 m corners at mu 0.3,
    with the body 33 deg sideways in the hairpin; 0.1-0.4 % at 40-60 m.
+   **Revised by roadmap 061 M2** (each surface's own tyre peak, as swb gives Isaac; see
+   Caveats and `mode-choice-m2.md`): far fewer corners (mu 0.3-0.45: 18 of 60 cases, not 43),
+   about 1.2 % where the surface does not fall off (mud, sand, loose snow), 0.3-0.6 % in
+   loose-ground hairpins, none on ice.
 
 Where it does not pay: high friction with a surface that falls off past the peak (asphalt,
 concrete: sliding 0.8, 0.6), on anything but a tight hairpin. There the plan drives on grip,
@@ -267,11 +271,18 @@ earlier, which on snow, where a front tyre alone turns the car slowly, is worth 
   drives PhysX's own, and a slide's gain of 0.3 % is far inside the model's error at the limit
   (the planner keeps 8 % of the grip back for exactly that, and grip share is equivalent to
   lower mu here).
-- **The planner's tyre does not take a surface's own peak.** swb scales each wheel's tyre
-  stiffness so it peaks at the class's `peak_slip` and `peak_slip_angle` (snow_packed 6 deg,
-  gravel 12 deg); model.tyre uses the rig's stiffness on every surface, so on snow it peaks at 3
-  deg where Isaac's peaks at 6. A later peak on low friction means less of the slide is past it:
-  the snow results above are likely optimistic for drifting.
+- **The surface's own peak (fixed in roadmap 061 M2, `docs/mode-choice-m2.md`).** This study
+  ran on the rig's stiffness on every surface: on low friction its tyre saturated at 2-3 deg
+  and kept the full peak flat to the rig's 8.6 deg, where swb's fall-off began, so a slide's
+  first 5 deg cost nothing. swb scales each wheel's stiffness so the tyre peaks at the class's
+  own `peak_slip` / `peak_slip_angle` (snow_packed 6 deg, gravel 12, mud 12, ice 3); the planner
+  now does too (`model.tyre(surface=...)`, `SurfaceTable.tyre`, checked against swb's code).
+  Re-run on it (`m2-lowmu`, `m2-classes`): the mu 0.45/0.3 rows above shrink from 43 of 60
+  drift-optimal cases to 18, the classes from 53 of 80 to 32. A drift stays optimal where the
+  surface does not fall off (mud, sand, loose snow, sliding 1.0: about 1.1-1.3 %, against
+  1.5-2.5 % here) and in hairpins of R 9-25 on loose ground (0.3-0.6 %); on packed snow only in
+  hairpins (0.34 %, not 1.95), on ice nowhere. Every low-friction section is also 1-4 % slower
+  on the new tyre. The table and the low-friction bullets above are the old tyre's.
 - **Solver.** Local optima on low friction: the noise (the spread over starts) reaches 0.28 s on
   mu 0.45 hairpins, where 8 of the 20 mu 0.45 cases are left undecided. More starts
   (continuation in mu) would settle them. In 6 of the 150 rear-held cases one start failed (one

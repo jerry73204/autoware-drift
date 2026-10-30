@@ -11,7 +11,10 @@ Isaac judges them (the live planner's design, section 6).
 - The onboard computers: sim_vehicle_ecu itself (the code aib runs in Isaac), stepped at
   Isaac's 60 Hz with the car's own sensors (wheel speeds, yaw rate, accelerations); the body
   and wheels at 8 substeps of it, as PhysX's vehicle.
-- The road: the track's friction, sliding share and grade at the car's nearest node.
+- The road: the track's friction, sliding share, tyre (the surface's peak, model.tyre's
+  `surface`) and grade at the car's nearest node. A patch or mu_scale lowers the friction
+  alone, the stiffness kept: the tyre's peak slip falls with it (as the planner's grip share
+  does), where swb's road condition would keep the class's peak (roadmap 061 M2).
 - A wrong plant on request: grip and load transfer scaled (mu_scale, transfer_scale), the
   plan's model left as it is; and local friction patches the planner's map does not know
   (`patches`: (s_from, s_to, scale) each, the friction there times scale), as Isaac's M6 test
@@ -32,6 +35,7 @@ import numpy as np
 import yaml
 
 from race_planner import model
+from race_planner.track import TYRE_FIELDS
 
 SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
 ECU_RATE, SUBSTEPS = 60.0, 8
@@ -62,10 +66,10 @@ class Plant:
         self.I_wheel = 0.5 * m_wheel * self.car.r_wheel ** 2
         self.damping = float(w.get("damping_rate", 0.0))
         xs, us, acc = ca.SX.sym("x", 3), ca.SX.sym("u", 5), ca.SX.sym("acc", 2)
-        mu, sl = ca.SX.sym("mu"), ca.SX.sym("sl")
+        mu, sl, sf = ca.SX.sym("mu"), ca.SX.sym("sl"), ca.SX.sym("surface", 4)
         o = model.dynamics(self.car, [xs[0], xs[1], xs[2]], [us[i] for i in range(5)], mu,
-                           [acc[0], acc[1]], sl)
-        self.f = ca.Function("f", [xs, us, acc, mu, sl],
+                           [acc[0], acc[1]], sl, sf)
+        self.f = ca.Function("f", [xs, us, acc, mu, sl, sf],
                              [ca.vertcat(*o["dx"]), ca.vertcat(*o["acc"]),
                               ca.vertcat(*o["torque"]), ca.vertcat(*o["fz"])])
         self.t = 0.0
@@ -134,11 +138,12 @@ class Plant:
             i = self.nearest()
             mu = float(self.track.mu[i]) * self.mu_scale * self.patch(float(self.track.s[i]))
             sl = float(self.track.sliding[i])
+            sf = [float(getattr(self.track, k)[i]) for k in TYRE_FIELDS]
             grade = float(self.track.grade[i])
             for _ in range(SUBSTEPS):
                 u = [self.delta] + list(self.w * R)
                 dx, acc, torque, fz = (np.asarray(q).ravel() for q in
-                                       self.f(self.v, u, self.acc, mu, sl))
+                                       self.f(self.v, u, self.acc, mu, sl, sf))
                 # grade along the body's heading on the track (the planner's sign: a + grade climbs)
                 xi = self.psi - float(self.track.psi[i])
                 g_t = 9.81 * grade / math.sqrt(1 + grade * grade)

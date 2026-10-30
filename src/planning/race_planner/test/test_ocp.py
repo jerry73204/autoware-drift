@@ -15,7 +15,7 @@ from race_planner.line import min_curvature_line
 from race_planner.ocp import solve_min_time
 from race_planner.qss import lap_time, speed_profile
 from race_planner.steady import steady_state
-from race_planner.track import SurfaceTable, Track
+from race_planner.track import TYRE_FIELDS, SurfaceTable, Track
 
 SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
 SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
@@ -94,7 +94,7 @@ def test_haruna_section_solves():
     t = Track.from_swb_course(HARUNA, SurfaceTable.from_yaml(CLASSES), c).resampled(2.0)
     t = dataclasses.replace(t, **{k: getattr(t, k)[:200] for k in
                                   ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right",
-                                   "mu", "grade", "sliding")})
+                                   "mu", "grade", "sliding") + TYRE_FIELDS})
     sol = solve_min_time(t, c, v_start=15.0)
     check_feasible(t, sol, c)
 

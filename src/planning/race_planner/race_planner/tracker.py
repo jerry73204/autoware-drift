@@ -49,12 +49,14 @@ import numpy as np
 
 from race_planner import axle
 from race_planner.ocp import STEER_RATE
+from race_planner.track import TYRE_FIELDS
 from race_planner.window import node_functions, wheel_speeds
 
 G = 9.81
 NX, NU, NS = 8, 2, 3            # states s n xi vx vy r delta a_last; inputs rate a; slacks
 NWHEEL = 3                      # the NMPC's internal controls: the wheels' peripheral speeds
-NP = 6                          # stage parameters: kappa mu grade sliding ax_load ay_load
+NP = 10                         # stage parameters: kappa mu grade sliding ax_load ay_load,
+# the surface's tyre (stiff_long stiff_lat peak_long peak_lat: model.tyre's `surface`)
 NR = 6                          # references per node: n xi vx vy r delta
 # Tracking scales: the error that costs as much as one unit (the cost is the error over its
 # scale, squared). The line's are what L1's envelope allows (0.5 m, 5 deg, 2 m/s: 4.4) halved;
@@ -95,7 +97,8 @@ def _dynamics(car, grip=1.0, tyres=False):
     s, n, xi, vx, vy, r, delta = (x[i] for i in range(7))
     kappa, mu, grade, sliding = p[0], grip * p[1], p[2], p[3]
     o = axle.dynamics(car, [vx, vy, r], [delta, u[1]], mu, [p[4], p[5]], sliding,
-                      w_rear=u[2] if tyres else None, w_front=(u[3], u[4]) if tyres else None)
+                      w_rear=u[2] if tyres else None, w_front=(u[3], u[4]) if tyres else None,
+                      surface=p[6:10])
     sin_t = grade / ca.sqrt(1 + grade * grade)
     sdot = (vx * ca.cos(xi) - vy * ca.sin(xi)) / (1 - n * kappa)
     xdot = ca.vertcat(sdot, vx * ca.sin(xi) + vy * ca.cos(xi), r - kappa * sdot,
@@ -107,7 +110,7 @@ def _dynamics(car, grip=1.0, tyres=False):
     _, g1, lbg, ubg, _ = node_functions(car, tyres=tyres)
     x6 = ca.vertcat(vx, vy, r, n, xi, delta)
     rows = g1(x6, ca.vertcat(u[0], u[1], p[4], p[5], *([u[2], u[3], u[4]] if tyres else [])),
-              ca.vertcat(kappa, mu, grade, sliding))
+              ca.vertcat(kappa, mu, grade, sliding, p[6:10]))
     sel = list(range(6, 14)) + (list(range(15, len(lbg))) if tyres else [])
     g = ca.Function("g", [x, u, p], [rows[sel]])
     return f, acc, g, np.array(lbg, float)[sel], np.array(ubg, float)[sel]
@@ -170,6 +173,11 @@ def _track_at(track, s):
             np.interp(s, tr.s, tr.w_right))
 
 
+def _tyre_at(track, s):
+    """The surface's tyre (model.tyre's four shares) at the arclengths s: 4 x len(s)."""
+    return np.vstack([np.interp(s, track.s, getattr(track, k)) for k in TYRE_FIELDS])
+
+
 def _plan_states(plan, s0, x0, N, dt):
     """A trajectory along the plan from s0: s advanced at the plan's speed, the plan's states
     there (the first node the car's), its inputs."""
@@ -219,7 +227,7 @@ class LqrTracker:
         Xr = X.copy()
         Xr[1:, 0] = pl.at(np.array([state["s"]]))[0][:, 0]     # the reference at the car's s
         kappa, mu, grade, sl, _, _ = _track_at(self.track, Xr[0, :N])
-        P = np.vstack([kappa, mu, grade, sl, acc])
+        P = np.vstack([kappa, mu, grade, sl, acc, _tyre_at(self.track, Xr[0, :N])])
         A, B = (np.asarray(m) for m in self.jac(Xr[:, :N], U, P))
         A = A.reshape(6, 6, N, order="F").transpose(2, 0, 1)     # the map's blocks side by side
         B = B.reshape(6, 2, N, order="F").transpose(2, 0, 1)
@@ -404,7 +412,7 @@ class Tracker:
         mu = mu * mu_scale             # the car's own estimate, over the whole second ahead
         _, _, _, _, wl, wr = _track_at(self.track, X[0, :N])
         m = self.half + EDGE_MARGIN
-        P = np.vstack([kappa, mu, grade, sl, acc])
+        P = np.vstack([kappa, mu, grade, sl, acc, _tyre_at(self.track, X[0, :N])])
         return np.concatenate([P.ravel(order="F"), ref.ravel(order="F"), aref, wl - m, wr - m])
 
     def _pack(self, X, U):
