@@ -1,8 +1,7 @@
 # 007: on packed snow the car's slide runs away from a modest planned slide
 
 **Severity:** medium (packed snow's R 15 x 90 and R 25 x 90 corners at 15 m wide stop in every
-arm and every configuration since M4: 2 of 12 corners lost per arm). **Status:** open (an L2
-matter: roadmap 060 R3, the tracker holding the plan's sideslip).
+arm and every configuration since M4: 2 of 12 corners lost per arm). **Status:** fixed (L2's line weight on low friction; see the root cause).
 
 ## What is wrong
 
@@ -53,9 +52,14 @@ wheels recorded (logs: swb `play_log/race_planner/mode_choice/i007/trace/`):
   (vy 0.3, r 0.15) with the line's at 0.2: 15:90:15 still stalls; the speed's looser (2.0)
   with the line's at 0.2: both lost. (`i007/sweep1`.)
 
-**Fix:** the line's scale grows as the friction falls, 0.2 m x max(1, 1 / mu) at each stage's
-friction (the map's times the car's estimate, what L2 already models): asphalt (1.12) and
-concrete keep 0.2 m exactly, packed snow 1.0 m, ice 0.75, mud 0.69, loose snow 0.8.
+**Fix** (`tracker.LINE_MU`): the line's scale grows as the friction falls, 0.2 m x max(1,
+1 / mu) at each stage's friction (the map's times the car's estimate, what L2 already models):
+asphalt (1.12) and concrete keep 0.2 m, packed snow 1.0 m, ice 0.75, mud 0.69, loose snow 0.8.
+The weight is a parameter of a second QP function (`Tracker.qp_line`), used when a stage's
+friction is under 1; elsewhere the constant-weight QP runs, so asphalt is L2 as before bit for
+bit (a parameter in place of a constant changes CasADi's folding of constants, and the closed
+loop turns the last bits into another lap: Haruna 76.43 s against 76.28 under `RP_DET`).
+Test `test_the_line_weighs_less_as_the_friction_falls`.
 
 ## The chain's packed-snow hairpin (R 25, s 1200-1280)
 
