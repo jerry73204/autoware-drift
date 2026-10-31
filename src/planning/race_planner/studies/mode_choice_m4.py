@@ -32,7 +32,9 @@ Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> 
       --digest: a sha256 of every plan the driver made (X, U, s, t) and of the plant's states,
       for bit-for-bit comparisons (roadmap 065 E1). With RP_DET=1 in the environment the solvers
       run without a clock (IPOPT uncut by wall time, every solve timed 0 s, so a plan is adopted
-      at the fixed latency), which makes a run repeatable bit for bit on any load; RP_ROOT puts
+      at the fixed latency), which makes a run repeatable bit for bit on any load; with
+      RP_ITERCAP=<n> too, a budgeted solve is cut at n iterations a second of its budget instead
+      (the budget, load-free; 170 is about 1 s at 5.8 ms an iteration); RP_ROOT puts
       another race_planner tree first (another commit's, for the same comparison).
       ... oracle <course>;  ... report
 Results: swb's play_log/race_planner/mode_choice/m4/.
@@ -74,7 +76,13 @@ def _deterministic():
     window.time = tracker.time = multistart.time = clock
     init = window.Window.__init__
 
+    cap = os.environ.get("RP_ITERCAP")
+
     def uncut(self, *a, **kw):
+        # RP_ITERCAP: the budget as IPOPT iterations a second of it (a budgeted window's
+        # max_iter its budget times this), so a run is repeatable and still budgeted (M4d)
+        if cap and kw.get("budget") is not None:
+            kw["max_iter"] = max(1, int(round(float(cap) * kw["budget"])))
         kw["budget"] = None
         init(self, *a, **kw)
     window.Window.__init__ = uncut
@@ -245,6 +253,7 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "estimate_min": float(min([r["mu_scale"] for r in log] or [1.0])),
            "style": None if style is None else getattr(d, "style", None).to_dict(),
            "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
+           "itercap": os.environ.get("RP_ITERCAP"),
            **({} if dig is None else dig.result())}
     os.makedirs(OUT, exist_ok=True)
     key = run_key(name, arm, err, seed, perc, est, rep, tag)

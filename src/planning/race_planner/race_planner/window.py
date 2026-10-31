@@ -243,19 +243,24 @@ def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
 KAPPA_ROWS = [ROWS.index(n) for n in ("kappa_rl", "kappa_rr", "kappa_fl", "kappa_fr")]
 
 
+KAPPA_SHARE_LOW = 0.5   # a surface peaking at under this share of the rig's slip: issue 008
+
+
 def kappa_rows_by_peak(g):
     """g(x, u, p) with each wheel's slip-ratio row in the surface's own longitudinal peak where
-    that peaks at a smaller slip than the rig's (over p[6], model.tyre's peak share, where it is
-    below 1): KAPPA_MAX and FRONT_KAPPA_UP as many of the surface's peaks as of the rig's.
-    Ice peaks at 0.05, a fifth of the rig's slip: KAPPA_MAX was twelve of its peaks, far onto
-    the flat of its fall-off, where the slope rows have no gradient and IPOPT's iterate,
-    wandered there, stopped locally infeasible (issue 008). The reference surface (share 1)
-    and any surface peaking later: the rows unchanged."""
+    that peaks at under KAPPA_SHARE_LOW of the rig's slip (over p[6], model.tyre's peak share):
+    KAPPA_MAX and FRONT_KAPPA_UP as many of the surface's peaks as of the rig's. Ice peaks at
+    0.05, a fifth of the rig's slip: KAPPA_MAX was twelve of its peaks, far onto the flat of
+    its fall-off, where the slope rows have no gradient and IPOPT's iterate, wandered there,
+    stopped locally infeasible (issue 008). Elsewhere the rows unchanged: on packed snow (0.59
+    of the rig's) the scaled rows cost one corner of twelve 3.6 s in M4d's iteration-budgeted
+    runs (R 9 x 180 at 15 m, 11 failed re-plans against 0) and nothing else; swb's classes
+    under the share are ice (0.20) and sand (0.47)."""
     x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", NU), ca.SX.sym("p", NP)
     rows = g(x, u, p)
     sc = ca.SX.ones(rows.shape[0])
     for i in KAPPA_ROWS:
-        sc[i] = 1.0 / ca.fmin(p[6], 1.0)
+        sc[i] = ca.if_else(p[6] < KAPPA_SHARE_LOW, 1.0 / p[6], 1.0)
     return ca.Function("g", [x, u, p], [rows * sc])
 
 
