@@ -27,6 +27,13 @@ Its drift gain (held - best) is the ceiling a loop can keep.
 
 Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> --arm sched
           [--err 10 --seed 1 --perc --est --rep 1 --cpus 8,9,10,11]
+          [--style <style.yaml or JSON>] [--digest]
+      --style: the driving style record (roadmap 065; live.Driver's style), none by default;
+      --digest: a sha256 of every plan the driver made (X, U, s, t) and of the plant's states,
+      for bit-for-bit comparisons (roadmap 065 E1). With RP_DET=1 in the environment the solvers
+      run without a clock (IPOPT uncut by wall time, every solve timed 0 s, so a plan is adopted
+      at the fixed latency), which makes a run repeatable bit for bit on any load; RP_ROOT puts
+      another race_planner tree first (another commit's, for the same comparison).
       ... oracle <course>;  ... report
 Results: swb's play_log/race_planner/mode_choice/m4/.
 """
@@ -40,7 +47,7 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, os.environ.get("RP_ROOT") or os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from race_planner import live, modes  # noqa: E402
@@ -56,6 +63,25 @@ import mode_choice_e1 as e1  # noqa: E402
 import mode_choice_m3b as m3b  # noqa: E402
 
 SWB = e1.SWB
+
+
+def _deterministic():
+    """RP_DET=1: no clock in the planner (module docstring). Applied at import, so the seed
+    processes (spawned: they import this script again) run the same way."""
+    import types
+    from race_planner import multistart, tracker, window
+    clock = types.SimpleNamespace(time=lambda: 0.0, perf_counter=lambda: 0.0)
+    window.time = tracker.time = multistart.time = clock
+    init = window.Window.__init__
+
+    def uncut(self, *a, **kw):
+        kw["budget"] = None
+        init(self, *a, **kw)
+    window.Window.__init__ = uncut
+
+
+if os.environ.get("RP_DET") == "1":
+    _deterministic()
 OUT = os.environ.get("M4_OUT", os.path.join(SWB, "play_log/race_planner/mode_choice/m4"))
 GRIP, DS = e1.GRIP, e1.DS
 RATE = 50.0
@@ -129,7 +155,8 @@ def _load():
 
 
 def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=None, rules=None,
-        sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None):
+        sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None, style=None,
+        digest=False):
     car = Car.from_spec(e1.SPEC)
     if sd is not None:
         import race_planner.surface as sf
@@ -152,7 +179,9 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
                beta_max=None if beta_max is None else math.radians(beta_max),
                **({} if front is None else {"front_slip_max": None if front <= 0 else front}),
                **({} if rear is None else {"rear_slip_max": None if rear <= 0 else rear}),
-               **({} if rear_low is None else {"rear_slip_low": None if rear_low <= 0 else rear_low}))
+               **({} if rear_low is None else {"rear_slip_low": None if rear_low <= 0 else rear_low}),
+               **({} if style is None else {"style": style}))
+    dig = _digest(d, plant) if digest else None
     s_end = (span[1] + 10.0) if span else float(planner.s[-1]) - 10.0
     load0, c0 = _load(), time.time()
     v_used = v0
@@ -213,7 +242,10 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "adopted": _adopted(recs),
            "mode_changes": [(round(x["s0"]), x["mode_before"], x["mode"]) for x in recs
                             if x["mode"] != x["mode_before"]],
-           "estimate_min": float(min([r["mu_scale"] for r in log] or [1.0]))}
+           "estimate_min": float(min([r["mu_scale"] for r in log] or [1.0])),
+           "style": None if style is None else getattr(d, "style", None).to_dict(),
+           "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
+           **({} if dig is None else dig.result())}
     os.makedirs(OUT, exist_ok=True)
     key = run_key(name, arm, err, seed, perc, est, rep, tag)
     with open(os.path.join(OUT, key + ".json"), "w") as fh:
@@ -221,6 +253,50 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
     print(key, res["result"], res["t_timed"] or res["t_course"], "wall", round(wall),
           "load", load0, flush=True)
     return res
+
+
+class _digest:
+    """sha256 of every plan the driver makes (its first and each re-plan's, ok or not: X, U, s,
+    t) and of every plant state, in order; plus each plan's own short hash, to find where two
+    runs part."""
+
+    def __init__(self, d, plant):
+        import hashlib
+        self.plans, self.traj, self.each = hashlib.sha256(), hashlib.sha256(), []
+        start, replan, step = d.start, d._replan, plant.step
+
+        def add(p):
+            h = hashlib.sha256()
+            for k in ("X", "U", "s", "t"):
+                h.update(np.ascontiguousarray(np.asarray(p[k], float)).tobytes())
+            self.plans.update(h.digest())
+            self.each.append(h.hexdigest()[:12])
+
+        def start_(state):
+            out = start(state)
+            add(d.plan)                      # the first plan (after the first re-plan's)
+            return out
+
+        def replan_(state, adopt_now=False):
+            n = len(d.solves)
+            out = replan(state, adopt_now)
+            if len(d.solves) > n:            # the solve's plan if adopted, else its marker
+                add(d.pending[1] if d.pending is not None else
+                    {"X": [len(d.solves)], "U": [0.0], "s": [0.0], "t": [0.0]})
+            return out
+
+        def step_(*a, **kw):
+            st = step(*a, **kw)
+            self.traj.update(np.array([float(st[k]) for k in sorted(st)
+                                       if isinstance(st[k], (int, float))]).tobytes())
+            return st
+
+        d.start, d._replan, plant.step = start_, replan_, step_
+        self.d = d
+
+    def result(self):
+        return {"plans_digest": self.plans.hexdigest(), "traj_digest": self.traj.hexdigest(),
+                "n_plans": len(self.each), "plan_hashes": self.each}
 
 
 def _adopted(recs):
@@ -787,7 +863,16 @@ def main():
                     help="L1's rear slip bound, as --front (rear_slip_max)")
     ap.add_argument("--rear-low", type=float, default=None,
                     help="L1's rear slip bound on slippery fall-off classes (rear_slip_low)")
+    ap.add_argument("--style", default=None,
+                    help="the driving style record (roadmap 065): a YAML path or JSON")
+    ap.add_argument("--digest", action="store_true",
+                    help="hash every plan and plant state (bit-for-bit comparisons)")
     a = ap.parse_args()
+    style = None
+    if a.style is not None:
+        from race_planner.style import Style
+        style = (Style.from_dict(json.loads(a.style)) if a.style.lstrip().startswith("{")
+                 else Style.from_yaml(a.style))
     cpus = [int(x) for x in a.cpus.split(",") if x] or None
     if cpus:
         os.sched_setaffinity(0, {cpus[0]})
@@ -801,7 +886,8 @@ def main():
         print("\n".join(corner_courses()))
         return
     return run(a.course, a.arm, a.err, a.seed, a.perc, a.est, a.rep, cpus[1:] if cpus else None,
-               json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low)
+               json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low,
+               style, a.digest)
 
 
 if __name__ == "__main__":
