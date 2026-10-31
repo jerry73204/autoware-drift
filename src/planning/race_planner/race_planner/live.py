@@ -312,14 +312,20 @@ class Driver:
         # and only where the car shows it, sliding more than the plan meant: on dry asphalt the
         # estimate read 0.6 against a demand of 0.75-0.8 g with the car on the plan's sideslip
         # (Haruna s 204), in the patch 0.67-0.72 against 0.83 with the car sliding 1.5-5 deg more
+        # and never in a planned slide (issue 004): there the tyres are saturated by design and
+        # the axles' forces turn the car as much as they move it, so the acceleration the car
+        # reaches (the estimator's reading) is not the road's friction (mud's hairpin reversal:
+        # 0.10-0.17 g against 0.29); an unplanned slide off a grip plan is still read
         X, _, _ = plan_at(self.plan, state["s"])
         beta = math.atan2(state["vy"], max(state["vx"], 0.5))
-        excess = abs(beta) - abs(math.atan2(X[1], max(X[0], 0.5)))
+        beta_plan = abs(math.atan2(X[1], max(X[0], 0.5)))
+        excess = abs(beta) - beta_plan
+        reads = excess >= MU_BETA and beta_plan < SLIDE_BETA
         if self.estimator is None:
-            if excess < MU_BETA:
+            if not reads:
                 return 1.0
             return friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip)
-        raw = (None if excess < MU_BETA else
+        raw = (None if not reads else
                friction_scale(self.car, mu_map, state["mu_ratio"], self.demand, self.grip))
         return self.estimator.update(state["t"], raw,
                                      sliding=excess >= MU_BETA or abs(beta) >= SLIDE_BETA,

@@ -145,3 +145,32 @@ def test_a_first_plan_whose_cold_solve_fails_is_rescued_from_more_starts():
     d.start(plant.state())
     assert d.plan["ok"]
     assert [x[0] for x in d.first_rescue][:2] == ["G", "G+"]
+
+
+def test_no_reading_in_a_planned_slide():
+    """Issue 004: the car's estimate is read where the car slides more than a grip plan, never
+    in a planned slide (the reached acceleration there is not the road's friction)."""
+    from race_planner.surface import FrictionEstimate
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0, 300.0, ds=4.0, w=5.0)
+    d = Driver(c, tr, Tracker(c, tr), use_estimate=True, estimator=FrictionEstimate())
+    n = 20
+    ss = 100.0 + 4.0 * np.arange(n + 1)
+
+    def plan(beta_deg):
+        X = np.zeros((6, n + 1))
+        X[0] = 10.0
+        X[1] = 10.0 * math.tan(math.radians(beta_deg))
+        U = np.zeros((4, n))
+        U[2] = 0.8 * 9.81                 # the plan asks 0.8 g there: near the limit
+        return {"s": ss, "X": X, "U": U, "t": np.linspace(0.0, 8.0, n + 1)}
+
+    def state(t, beta_deg):
+        return {"t": t, "s": 120.0, "vx": 10.0, "vy": 10.0 * math.tan(math.radians(beta_deg)),
+                "mu_ratio": 0.3}
+
+    d.plan = plan(20.0)                               # a planned slide, the car 5 deg wider
+    assert d.mu_scale(state(0.0, 25.0)) == 1.0
+    d.plan = plan(0.0)                                # a grip plan, the car sliding 5 deg
+    assert d.mu_scale(state(0.1, 5.0)) < 0.5
+    d.close()
