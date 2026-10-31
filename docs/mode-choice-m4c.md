@@ -208,3 +208,8 @@ iterations a window; the R3 solver levers), not a scheduler change.
 - **Single-start chain runs at load 7.7-9.7 are counted** (robustness gate < 10), but their
   0 of 2 true-map finishes are not set against the multi-start arms' 4 of 4 as an arm effect.
 - **Issue 007 (packed snow's runaway slide) is left open as an L2 matter** (060 R3).
+- **Runs after 13:42 are counted on the code with roadmap 065's style plumbing** (another
+  session's commits 3667c87, 26cb0be, b96a77a, landed in the shared working tree during the
+  `m4c2` ice batch): its default style S1 is specified to leave the planner unchanged; not
+  re-verified bit for bit here. Cost if wrong: the `m4c2` ice, packed-snow, loose-snow and chain
+  runs carry an unmeasured change.
