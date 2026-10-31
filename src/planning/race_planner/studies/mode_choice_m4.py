@@ -27,7 +27,7 @@ Its drift gain (held - best) is the ceiling a loop can keep.
 
 Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> --arm sched
           [--err 10 --seed 1 --perc --est --rep 1 --cpus 8,9,10,11]
-          [--style <style.yaml or JSON>] [--digest]
+          [--style <style.yaml or JSON>] [--digest] [--jit 1e-9]
       --style: the driving style record (roadmap 065; live.Driver's style), none by default;
       --digest: a sha256 of every plan the driver made (X, U, s, t) and of the plant's states,
       for bit-for-bit comparisons (roadmap 065 E1). With RP_DET=1 in the environment the solvers
@@ -35,7 +35,10 @@ Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> 
       at the fixed latency), which makes a run repeatable bit for bit on any load; with
       RP_ITERCAP=<n> too, a budgeted solve is cut at n iterations a second of its budget instead
       (the budget, load-free; 170 is about 1 s at 5.8 ms an iteration); RP_ROOT puts
-      another race_planner tree first (another commit's, for the same comparison).
+      another race_planner tree first (another commit's, for the same comparison);
+      --jit: the start speed times (1 + jit), a last-bit start: ice's corners are chaotic (an
+      outcome flips with the last bit), so a repeatable run is one draw, and --jit 1e-9, 2e-9 ...
+      draw others (every run's plant digest differs; name each with --tag; M4e).
       ... oracle <course>;  ... report
 Results: swb's play_log/race_planner/mode_choice/m4/.
 """
@@ -164,12 +167,13 @@ def _load():
 
 def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=None, rules=None,
         sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None, style=None,
-        digest=False):
+        digest=False, jit=0.0):
     car = Car.from_spec(e1.SPEC)
     if sd is not None:
         import race_planner.surface as sf
         sf.CLASS_SD = sd
     planner, world, smap, s0, v0, span, info = tracks(name, car, err, seed)
+    v0 *= 1.0 + jit                     # a last-bit start (--jit)
     if sd is not None and smap is not None:
         smap.sd = sd
         base, *_ = course(name, car, err, seed)
@@ -253,7 +257,7 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "estimate_min": float(min([r["mu_scale"] for r in log] or [1.0])),
            "style": None if style is None else getattr(d, "style", None).to_dict(),
            "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
-           "itercap": os.environ.get("RP_ITERCAP"),
+           "itercap": os.environ.get("RP_ITERCAP"), "jit": jit,
            **({} if dig is None else dig.result())}
     os.makedirs(OUT, exist_ok=True)
     key = run_key(name, arm, err, seed, perc, est, rep, tag)
@@ -876,6 +880,8 @@ def main():
                     help="the driving style record (roadmap 065): a YAML path or JSON")
     ap.add_argument("--digest", action="store_true",
                     help="hash every plan and plant state (bit-for-bit comparisons)")
+    ap.add_argument("--jit", type=float, default=0.0,
+                    help="the start speed times (1 + jit): another draw of a chaotic run")
     a = ap.parse_args()
     style = None
     if a.style is not None:
@@ -896,7 +902,7 @@ def main():
         return
     return run(a.course, a.arm, a.err, a.seed, a.perc, a.est, a.rep, cpus[1:] if cpus else None,
                json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low,
-               style, a.digest)
+               style, a.digest, a.jit)
 
 
 if __name__ == "__main__":

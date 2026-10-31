@@ -2,7 +2,8 @@
 
 **Severity:** high on ice (a third of ice's re-plans fail, M4c; of the 119 recorded ice windows
 not solved within the budget, 56 end `Infeasible_Problem_Detected` even unbudgeted).
-**Status:** fixed (roadmap 061 M4d); ice's closed-loop finishes unchanged (see Measured).
+**Status:** fixed (roadmap 061 M4d); kept after M4e (with issue 007's fix, ice's finishes the
+same within noise; see Measured).
 
 ## What is wrong
 
@@ -46,6 +47,14 @@ test_the_slip_ratio_rows_are_in_the_surfaces_own_peak_where_it_peaks_earlier`.
   compiled form of the same rows: 28 of 36); failed re-plans 28 % before, 27 % and 17 % after.
   Within the corners' own chaos (one corner's outcome flips with the last bit of the compiled
   code), no change in what finishes.
+
+- **M4e** (`docs/mode-choice-m4e.md`; 2 x 2 with issue 007's fix, 20 draws of the 12 corners
+  by a last-bit start): with 007's fix, single 9.55 against 9.70 of 12 without the rows' fix
+  (se 0.32), sched 9.80 against 10.40 (se 0.42): not worse beyond noise, so the fix stays.
+  M4d's 32 against 40 of 60 was the draw (without 007: 6.27 against 6.87, se 0.45). One corner
+  moves for real: R 9 x 180 at 6 m, 0 of 30 with the rows against 21 of 30 without; its
+  windows need 260-1200 iterations with either rows, and only without them do a few land under
+  the budget (L1's budget, not this fix's fault).
 
 ## Not the fix: the free stages' slope rows
 
