@@ -65,6 +65,15 @@ NR = 6                          # references per node: n xi vx vy r delta
 # steering: at 0.5 it wandered 25-30 deg off it on the live bend (p95 25 deg), with 0.1 it
 # keeps within 13 deg (p95 6), tracking as well (R20 bend 0.09 m, S-bend 0.14 m).
 SCALE_X = np.array([0.2, 0.1, 0.7, 0.8, 0.3, 0.1])        # n xi vx vy r delta
+# The line's scale grows as the friction falls: SCALE_X[0] x max(1, LINE_MU / mu) at each stage's
+# friction (the map's times the car's estimate). On asphalt it is 0.2 m; at packed snow's 0.2
+# it is 1.0 m. Within the horizon a car on a slippery road moves itself across the road only
+# slowly, and the fastest handle it has on its offset is its rotation: at 0.2 m, L2 bought a
+# few tenths of a metre with steering into the turn and rear braking, the slide went past the
+# rear's peak, the car slowed and its path tightened, and the next tick asked for more
+# rotation -- packed snow's R 15 and R 25 corners ran from the plans' 6 deg to 56 deg and
+# stalled or spun (docs/issues/007)
+LINE_MU = 1.0
 SCALE_RATE, SCALE_A, SCALE_JERK = 1.5, 3.0, 25.0          # rad/s; m/s^2 off the plan's; m/s^3
 TERMINAL = 10.0                 # the last node's weight: where the car is in a second counts
 EDGE_QUAD, EDGE_LIN = 1e4, 1e3  # the edge slack's cost per m^2, per m: far above tracking
@@ -295,8 +304,10 @@ class Tracker:
         REF = ca.SX.sym("REF", NR, N)       # references at x_1 .. x_N
         AREF = ca.SX.sym("AREF", N)         # the plan's request on each stage
         WL, WR = ca.SX.sym("WL", N), ca.SX.sym("WR", N)   # the free width at x_0 .. x_N-1
-        par = ca.vertcat(ca.vec(P), ca.vec(REF), AREF, WL, WR)
+        ISN = ca.SX.sym("ISN", N)           # the line's weight at x_1 .. x_N (_params: LINE_MU)
+        par = ca.vertcat(ca.vec(P), ca.vec(REF), AREF, WL, WR, ISN)
         res, lin, cons, lbc, ubc = [], 0, [], [], []
+        line = []                           # the line's residuals with its weight a parameter
         # the limit rows (see _dynamics): use x4, drive, power, the brakes x2, then the tyres':
         # rear balance, its slips x2, front balances x2, their slips x2, the slopes x4
         soft, bal = [0, 1, 2, 3], [4, 5, 6, 7, 9, 10, 13, 14, 15, 16, 17, 18]
@@ -310,6 +321,10 @@ class Tracker:
                     (uk[1] - xk[7]) / (SCALE_JERK * dt)]
             e = xn[1:7] - REF[:, k]
             wk = TERMINAL if k == N - 1 else 1.0
+            # the line's residual twice: its weight a constant (SCALE_X's, CasADi folds it into
+            # the rest's arithmetic) and a parameter (sqrt(wk) / its scale, from LINE_MU); see
+            # the QP functions below
+            line.append((len(res), ISN[k] * e[0]))
             res += [math.sqrt(wk) * e[i] * isx[i] for i in range(NR)]
             res += [math.sqrt(EDGE_QUAD) * sk[0], math.sqrt(USE_QUAD) * sk[1],
                     math.sqrt(BAL_QUAD) * sk[2]]
@@ -351,6 +366,19 @@ class Tracker:
         H = ca.mtimes(J.T, J) + ca.diag(ca.DM(damp))
         grad = ca.mtimes(J.T, R) + ca.gradient(lin, w)
         self.qp = ca.Function("rti_qp", [w, par], [H, grad, C, Jc])
+        # the same QP with the line's weight from LINE_MU, used when a stage's friction is
+        # under it: two functions, so that on a road at LINE_MU or more (asphalt) L2 is the
+        # constant-weight QP, bit for bit (a parameter changes CasADi's folding of constants
+        # and the arithmetic's last bits; the closed loop amplifies those into another lap)
+        for i, r in line:
+            res[i] = r
+        R = ca.vertcat(*res)
+        J = ca.jacobian(R, w)
+        H2 = ca.mtimes(J.T, J) + ca.diag(ca.DM(damp))
+        assert H2.sparsity() == H.sparsity()
+        self.qp_line = ca.Function("rti_qp_line", [w, par],
+                                   [H2, ca.mtimes(J.T, R) + ca.gradient(lin, w), C, Jc])
+        self.isn = self._line_weights(np.full(N, np.inf))     # the constant's
         opts = {"error_on_fail": False, "print_problem": False}
         if qpsol == "hpipm":
             opts.update({"hpipm": {"iter_max": 100, "mode": "balance", "res_g_max": 1e-5,
@@ -413,7 +441,15 @@ class Tracker:
         _, _, _, _, wl, wr = _track_at(self.track, X[0, :N])
         m = self.half + EDGE_MARGIN
         P = np.vstack([kappa, mu, grade, sl, acc, _tyre_at(self.track, X[0, :N])])
-        return np.concatenate([P.ravel(order="F"), ref.ravel(order="F"), aref, wl - m, wr - m])
+        return np.concatenate([P.ravel(order="F"), ref.ravel(order="F"), aref, wl - m, wr - m,
+                               self._line_weights(mu)])
+
+    def _line_weights(self, mu):
+        """The line's residual weights at the stages' friction mu: sqrt(the stage's weight) over
+        SCALE_X[0] x max(1, LINE_MU / mu)."""
+        isn = 1.0 / (SCALE_X[0] * np.maximum(1.0, LINE_MU / mu))
+        isn[-1] *= math.sqrt(TERMINAL)
+        return isn
 
     def _pack(self, X, U):
         N = self.N
@@ -438,7 +474,8 @@ class Tracker:
         X, U, acc = self._guess(x0, self.plan)
         p = self._params(X, acc, self.plan, state.get("mu_scale", 1.0))
         w = self._pack(X, U)
-        H, grad, C, Jc = self.qp(w, p)
+        qp = self.qp if np.array_equal(p[-self.N:], self.isn) else self.qp_line   # LINE_MU
+        H, grad, C, Jc = qp(w, p)
         lbw, ubw = self.lbw - w, self.ubw - w
         lbw[:NX] = ubw[:NX] = 0.0                     # x_0 is the car's: no step there
         sol = self.solver(h=H, g=grad, a=Jc, lba=self.lbc - C, uba=self.ubc - C,

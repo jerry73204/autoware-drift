@@ -182,3 +182,36 @@ def test_an_overrun_tick_falls_back_to_the_lqr(car, s_case):
         assert abs(o["tire_angle"]) <= car.steer_max
         st = p.step(o["accel"], o["tire_angle"], dt=TICK)
     assert abs(st["n"] - plan["X"][3, 0]) < 0.3
+
+
+def test_the_line_weighs_less_as_the_friction_falls(car, bend_case):
+    """docs/issues/007: the line's scale is SCALE_X[0] x max(1, LINE_MU / mu) at each stage's
+    friction, so on packed snow (0.2) an offset costs 1/25 of asphalt's and L2 no longer buys a
+    few tenths of a metre with a slide past the rear's peak; at LINE_MU or more (asphalt) the
+    weight is the 0.2 m one, and L2 the constant-weight QP itself (bit for bit as before)."""
+    from race_planner import tracker as T
+    track, plan = bend_case
+    tr = Tracker(car, track)
+    st = Plant(car, SPEC, track.resampled(1.0)).reset(s=0.0, n=plan["X"][3, 0],
+                                                      speed=plan["X"][0, 0])
+    x0 = np.array([st["s"], st["n"], st["xi"], st["vx"], st["vy"], st["r"], 0.0, 0.0])
+    X, U, acc = tr._guess(x0, T._Plan(plan))
+    w = tr._pack(X, U)
+    k = 10                                       # x_k's n, a stage's own residual alone in H
+    i = k * (T.NX + tr.nu + T.NS) + 1
+    mu = float(track.mu[0])
+
+    def weight(mu_to):
+        H = tr.qp_line(w, tr._params(X, acc, T._Plan(plan), mu_to / mu))[0]
+        return float(H[i, i]) - 1e-6           # less the Hessian's own floor (Tracker's damp)
+
+    def constant(mu_to):                       # step's choice: the constant-weight QP?
+        return np.array_equal(tr._params(X, acc, T._Plan(plan), mu_to / mu)[-tr.N:], tr.isn)
+
+    assert weight(T.LINE_MU) == pytest.approx(1.0 / T.SCALE_X[0] ** 2, rel=1e-9)
+    assert weight(1.5 * T.LINE_MU) == pytest.approx(weight(T.LINE_MU), rel=1e-12)
+    assert weight(0.2) == pytest.approx((0.2 / T.LINE_MU) ** 2 * weight(T.LINE_MU), rel=1e-9)
+    assert constant(mu) and constant(T.LINE_MU) and not constant(0.99 * T.LINE_MU)
+    p = tr._params(X, acc, T._Plan(plan))
+    H, H2 = tr.qp(w, p)[0], tr.qp_line(w, p)[0]
+    assert float(H2[i, i]) == pytest.approx(float(H[i, i]), rel=1e-12)
