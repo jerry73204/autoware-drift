@@ -265,7 +265,7 @@ class MultiStart:
         res = {slot: self.conns[slot].recv() for slot in starts}
         wall = time.time() - c
         from race_planner.live import cut_iterate
-        d.cut = cut_iterate(res["G"]) if "G" in res else None
+        d.cut = cut_iterate(res["G"]) if "G" in res and d.cut_warm else None
         for slot in self.slots:
             r = res.get(slot)
             self.last[slot] = r if r is not None and r["ok"] else None
@@ -425,7 +425,7 @@ class MultiStart:
         g = d.warm.solve(self.track, i0, x0, v_end, Xw, Uw, mu_scale=mu)
         g["lam"], g["lam_x"] = d.warm.lam, d.warm.lam_x
         from race_planner.live import cut_iterate
-        d.cut = cut_iterate(g)
+        d.cut = cut_iterate(g) if d.cut_warm else None
         res = {"G": g}
         kinds["G"] = "adopted" if g_from is adopted else "own"
         res.update({slot: self.conns[slot].recv() for slot in starts})

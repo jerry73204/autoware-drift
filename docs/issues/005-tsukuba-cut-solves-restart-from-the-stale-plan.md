@@ -43,6 +43,9 @@ slip angles moved the first cut solve by nothing (203 against 197 iterations).
 `live.Driver` keeps a cut G solve's iterate when it is near feasible (row violation and
 shooting gap within `CUT_WARM`, 0.2: a 0.05 bound took the iterate in one of four
 recorded runs, the clock's cut point deciding) and warm-starts the next G solve from it instead of the
-adopted plan (both the single start and the scheduler's G); dropped on the next solve. A cut
+adopted plan (both the single start and the scheduler's G); dropped on the next solve. Not on a
+track with ice (`rear_slip_low` in effect, `Driver.cut_warm`): on the rear's falling branch the
+cut iterate led the next solves further off (ice's 12 corners, single start, one repeat, load
+4-5: 10 finished without it, 6 with it; with issue 006's fix in both). A cut
 iterate is never adopted (the car still follows its last plan). Test:
 `test_live.py::test_a_cut_solve_warms_the_next`.

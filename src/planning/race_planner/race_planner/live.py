@@ -185,6 +185,10 @@ class Driver:
                       & (np.asarray(self.track.mu) <= MU_LOW)):
             self.rear_slip_low = None
         self.free_stages = FREE_STAGES
+        # a cut solve warms the next only off ice (issue 005): on the falling branch the cut
+        # iterate led the next solves further off (ice corners, single start: 6 of 12 finished
+        # with it, 10 without)
+        self.cut_warm = self.rear_slip_low is None
         slips = {"front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
                  "rear_slip_low": self.rear_slip_low, "free_stages": self.free_stages}
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
@@ -407,7 +411,7 @@ class Driver:
             src = self.plan if self.cut is None else self.cut
             Xw, Uw = warm_from(self.warm, src, i0, x0, self.track)
             new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw, mu_scale=mu)
-            self.cut = cut_iterate(new)
+            self.cut = cut_iterate(new) if self.cut_warm else None
             wall = new["solve_s"]
         else:                            # every seed at once; the wall time is the slowest's
             new, wall = self.multi.replan(self, i0, x0, self.v_end(i0), mu)
