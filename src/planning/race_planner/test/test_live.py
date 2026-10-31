@@ -131,3 +131,17 @@ def test_a_car_slower_than_its_plan_is_never_behind_the_plan_it_drives():
     assert out["result"] == "done", out
     assert min(r["behind"] for r in d.log) >= -d.ds
     assert getattr(d, "behind", 0) == 0
+
+
+def test_a_first_plan_whose_cold_solve_fails_is_rescued_from_more_starts():
+    # issue 001: the cold window's one solve fails; the driver tries G with more iterations
+    # (then H, then D) before it gives up, and the car starts
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0 if s < 150 else (1 / 60.0 if s < 250 else 0.0), 700.0, ds=4.0, w=5.0)
+    plant = Plant(c, SPEC, road(lambda s: 0.0, 700.0, ds=1.0, w=5.0))
+    plant.reset(s=20.0, speed=10.0)
+    d = Driver(c, tr, Tracker(c, tr))
+    d.cold = _Failing(d.cold)
+    d.start(plant.state())
+    assert d.plan["ok"]
+    assert [x[0] for x in d.first_rescue][:2] == ["G", "G+"]

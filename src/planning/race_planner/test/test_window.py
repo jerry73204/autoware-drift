@@ -164,3 +164,33 @@ def test_a_sideslip_bound_holds_and_costs_no_less_time():
     assert slip.max() <= beta + 1e-4
     assert np.abs(np.arctan2(pf["X"][1], pf["X"][0])).max() > beta    # it binds
     assert ph["time"] >= pf["time"] - 1e-3
+
+
+def test_a_front_slip_bound_holds_in_multiples_of_the_peak_where_the_surface_does_not_fall_off():
+    """Window(front_slip_max=k) (roadmap 061 M4b, docs/issues/002) keeps the front wheel's slip
+    angle within k times the surface's lateral peak at every node, and is never faster than
+    the free plan from the same start."""
+    from race_planner import model
+    c = car()
+    t = road(lambda s: 1.0 / 15.0 if 60.0 <= s < 60.0 + math.pi * 15.0 else 0.0, 160.0, ds=4.0,
+             w=4.0)
+    k = 0.3
+    free = Window(c, ds=4.0, length=160.0, warm=False, grip=1.0)
+    held = Window(c, ds=4.0, length=160.0, warm=False, grip=1.0, front_slip_max=k)
+    X, U = initial(t, c, v_start=18.0)
+    x0 = X[:, 0].copy(); x0[0] = 18.0
+    X[:, 0] = x0
+    pf = free.solve(t, 0, x0, 60.0, X, U)
+    ph = held.solve(t, 0, x0, 60.0, X, U)
+    assert pf["ok"] and ph["ok"], (pf["status"], ph["status"])
+
+    def front(p):
+        vx, vy, r, _, _, d = p["X"]
+        uy = vy + c.lf * r
+        lx, ly = np.cos(d) * vx + np.sin(d) * uy, -np.sin(d) * vx + np.cos(d) * uy
+        return np.abs(ly / (np.sqrt(lx * lx + 1e-4) + model.SLIP_LAT_OFFSET))
+
+    tp = model.peaks(c)[1] * t.peak_lat[0]
+    assert front(ph).max() <= k * tp * (1 + 1e-3)
+    assert front(pf).max() > k * tp                                   # it binds
+    assert ph["time"] >= pf["time"] - 1e-3

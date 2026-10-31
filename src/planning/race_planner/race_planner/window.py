@@ -203,6 +203,43 @@ def node_functions(car, tyres=False):
     return f, ca.Function("g", [x, u, p], [g]), lbg, ubg, out
 
 
+FLAT = 0.95     # a surface's sliding share this high: no fall-off past the peak (schedule's "flat")
+UNBOUND = 1e3   # the slip rows' multiple where a surface falls off (no bound in effect)
+MU_LOW = 0.45   # a surface's friction this low (schedule's mu_fallback) and its sliding share
+SLIDING_LOW = 0.75   # this low (ice's 0.7; packed snow's 0.8 is not): rear_slip_low applies
+FREE_STAGES = 3   # the live loop's first stages free of the slip and held rows (12 m at ds 4)
+
+
+def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
+    """g(x, u, p) with a row per bounded axle: its slip angle (tan, as model.tyre takes it; the
+    front at the bicycle's steering) over k times the surface's lateral peak (model.peaks, the
+    surface's share p[7]), within [-1, 1]; only on a surface without fall-off past its peak
+    (sliding share p[3] >= FLAT), where the tyre's force does not fall however deep it slides,
+    so nothing but this keeps the plan out of a slide the car cannot be held in (docs/issues/
+    002). Elsewhere the model's own fall-off does (the rows are there, UNBOUND wide), except
+    k_rear_low: the rear's bound on a surface that falls off deepest (sliding share SLIDING_LOW
+    or less) and whose planned friction p[1] is mu_low or less: ice (issue 003); None for none."""
+    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", NU), ca.SX.sym("p", NP)
+    vx, vy, r, delta = x[0], x[1], x[2], x[5]
+    tp = model.peaks(car)[1] * p[7]
+    flat = p[3] >= FLAT
+    rows = [g(x, u, p)]
+    if k_front is not None:
+        uy = vy + car.lf * r
+        c, s = ca.cos(delta), ca.sin(delta)
+        lx, ly = c * vx + s * uy, -s * vx + c * uy
+        tan_a = ly / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LAT_OFFSET)
+        rows.append(tan_a / (ca.if_else(flat, k_front, UNBOUND) * tp))
+    if k_rear is not None or k_rear_low is not None:
+        tan_a = (vy - car.lr * r) / (ca.sqrt(vx * vx + 1e-4) + model.SLIP_LAT_OFFSET)
+        k_flat = UNBOUND if k_rear is None else k_rear
+        k_fall = (UNBOUND if k_rear_low is None
+                  else ca.if_else(ca.logic_and(p[1] <= mu_low, p[3] <= SLIDING_LOW),
+                                  k_rear_low, UNBOUND))
+        rows.append(tan_a / (ca.if_else(flat, k_flat, k_fall) * tp))
+    return ca.Function("g", [x, u, p], [ca.vertcat(*rows)])
+
+
 def rk4(f, x, u, p, h):
     k1, t1 = f(x, u, p)
     k2, t2 = f(x + 0.5 * h * k1, u, p)
@@ -277,15 +314,28 @@ class Window:
 
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
                  tol=1e-3, budget=None, warm=True, compile=True, ipopt=None, beta_max=None,
-                 rear_alpha_max=None):
+                 rear_alpha_max=None, front_slip_max=None, rear_slip_max=None,
+                 rear_slip_low=None, free_stages=0):
         """beta_max: the body's sideslip, |atan(vy / vx)|, at most this (rad) at every node, the
         last one's END_SLIP with it; rear_alpha_max: the rear axle's slip angle, |atan((vy - lr
         r) / vx)|, at most this. None (the live planner's) leaves either free. Each is two linear
         rows per stage, |vy - c r| <= tan(bound) vx: for a study of what sliding buys (a plan
         held to grip driving against the free one, docs/drift-optimality.md), not a limit of
-        the car."""
+        the car.
+
+        front_slip_max, rear_slip_max: the front (the bicycle's front wheel) and the rear axle's
+        slip angle, model.tyre's tan alpha, at most this many times the surface's lateral peak
+        (model.peaks times the surface's peak share) on a surface without fall-off past the
+        peak (slip_rows), a row per stage each. A limit of control, not of the tyre: past it
+        the tyre is saturated and on such a surface its force does not say so, the steering no
+        longer turns the car (roadmap 061 M4b, docs/issues/002); None leaves it free.
+        rear_slip_low: the rear's bound on a slippery surface that falls off (issue 003).
+        free_stages: the first stages free of these rows and the held rows (the live loop's
+        FREE_STAGES: a window starts at the car's state, which may be past a bound); 0, every
+        stage bound (a study's)."""
         self.car, self.ds, self.grip, self.margin = car, ds, grip, margin
         self.beta_max, self.rear_alpha_max = beta_max, rear_alpha_max
+        self.front_slip_max, self.rear_slip_max = front_slip_max, rear_slip_max
         held = [(c, math.tan(b)) for c, b in ((0.0, beta_max), (car.lr, rear_alpha_max))
                 if b is not None]
         nb = 2 * len(held)
@@ -293,6 +343,13 @@ class Window:
         self.N = N = int(round(length / ds)) + 1
         self.M = M = N - 1
         self.f, self.g, lbg, ubg, self.out = node_functions(car, tyres=True)
+        self.rear_slip_low = rear_slip_low
+        nk = (front_slip_max is not None) + (rear_slip_max is not None or
+                                              rear_slip_low is not None)
+        if nk:
+            self.g = slip_rows(car, self.g, front_slip_max, rear_slip_max, rear_slip_low,
+                               grip * MU_LOW)
+            lbg, ubg = list(lbg) + [-1.0] * nk, list(ubg) + [1.0] * nk
         self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
         ng = len(lbg)
         # one stage in the scaled variables
@@ -326,6 +383,15 @@ class Window:
         self.ubg_all = np.concatenate([np.tile(np.r_[np.zeros(6), self.ubg, np.inf, 0.0, bhi], M),
                                        [np.inf, 0.0]])
         per = 6 + ng + 2 + nb
+        # the slip rows and the held rows not on the first FREE_STAGES stages: their nodes are the
+        # car's state and the next, which may already be past a bound (a car sliding past its
+        # peak made every held window infeasible from there on, H the fallback with it: issue
+        # 003); the plan must come back within the bound, not start there
+        for k in range(min(free_stages, M)):
+            lo = k * per
+            for i in list(range(lo + 6 + ng - nk, lo + 6 + ng)) + list(range(lo + 6 + ng + 2,
+                                                                              lo + per)):
+                self.lbg_all[i], self.ubg_all[i] = -np.inf, np.inf
         # warm-started in its multipliers too (shifted with the window), so the barrier starts
         # low (cold: IPOPT's own start, for the first plan and after a failure)
         extra, ipopt = ipopt or {}, {"max_iter": max_iter, "tol": tol, "acceptable_tol": 1e-3,

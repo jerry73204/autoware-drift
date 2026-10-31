@@ -20,7 +20,8 @@ import numpy as np
 
 from race_planner.line import min_curvature_line
 from race_planner.qss import speed_profile
-from race_planner.window import G, Window, friction_ahead, friction_scale, initial
+from race_planner.window import (FLAT, FREE_STAGES, G, MU_LOW, SLIDING_LOW, Window,
+                                 friction_ahead, friction_scale, initial)
 
 # leaving the plan's envelope re-plans at once (set once on the proving ground, not per track)
 ENVELOPE_LAT, ENVELOPE_BETA, ENVELOPE_SPEED = 0.5, math.radians(5.0), 2.0
@@ -38,6 +39,8 @@ STOP_DECEL = -6.0
 CORNER = 100.0                 # m: the corner a window must hold beyond its braking (design 4.1)
 BLEND = 10                         # nodes over which the warm start eases to the shifted plan
 TRACK_TAU = 0.5                    # s: how fast L2 takes a deviation from the plan out
+STALL_SPEED, STALL_TIME = 0.3, 5.0    # m/s, s: a car this slow this long, not stopping, stalled
+FIRST_MAX_ITER = 3000              # the first plan's rescue (issue 001): no budget, the car waits
 
 
 def plan_at(plan, s):
@@ -123,6 +126,21 @@ class Driver:
     # not followed by L2 and the ECU, but a 45 deg bound did not make them drivable either
     # (docs/mode-choice-m4.md)
     beta_max: float = None
+    # the front and rear axles' slip angles in every L1 window, the seeds' too, at most this
+    # many times the surface's lateral peak on a surface without fall-off past it (window.
+    # Window's front_slip_max, rear_slip_max; None: free). Roadmap 061 M4b (docs/issues/002):
+    # on mud the free plan ran the front tyres at 20 times their peak and the rear at 8, a slide
+    # no controller holds (every tyre saturated: the steering no longer turns the car), and the
+    # car spun at the zone chain's mud hairpin
+    # (1 and 3: the front at its peak, so the steering keeps its authority, the rear sliding to
+    # three times its peak; on a track with no such surface no rows are added at all, so the
+    # windows are 060's exactly)
+    front_slip_max: float = 1.0
+    rear_slip_max: float = 3.0
+    # and the rear on a slippery surface that falls off deepest past its peak (ice), in the same
+    # multiples (window.slip_rows' k_rear_low; None: free): at its peak. Roadmap 061 M4b, issue
+    # 003: the plans ran ice's rear on its falling branch, a slide the car cannot be held on
+    rear_slip_low: float = 1.0
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -149,10 +167,18 @@ class Driver:
             # two windows long (a warm start's cold tail starts up to 0.8 of a window on and
             # runs a whole one: one window crashed Isaac's run at the finish)
             self.track = self.track.extended(2 * self.length + 4 * self.ds)
+        if not np.any(np.asarray(self.track.sliding) >= FLAT):
+            self.front_slip_max = self.rear_slip_max = None
+        if not np.any((np.asarray(self.track.sliding) <= SLIDING_LOW)
+                      & (np.asarray(self.track.mu) <= MU_LOW)):
+            self.rear_slip_low = None
+        self.free_stages = FREE_STAGES
+        slips = {"front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
+                 "rear_slip_low": self.rear_slip_low, "free_stages": self.free_stages}
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
-                           beta_max=self.beta_max)
+                           beta_max=self.beta_max, **slips)
         self.warm = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
-                           budget=self.budget, beta_max=self.beta_max)
+                           budget=self.budget, beta_max=self.beta_max, **slips)
         self.plan = self.pending = None
         self.next_replan = 0.0
         self.busy_until = 0.0          # L1's core is busy with a solve until then
@@ -188,9 +214,15 @@ class Driver:
         X, U = initial(self.cold.section(self.track, i0), self.car, v_start=state["vx"])
         x0 = self.x_of(state)
         X[:, 0] = x0
-        plan = self.cold.solve(self.track, i0, x0, self.v_end(i0), X, U,
-                               mu_scale=self.mu_ahead(state, i0))
+        mu = self.mu_ahead(state, i0)
+        plan = self.cold.solve(self.track, i0, x0, self.v_end(i0), X, U, mu_scale=mu)
         self.warm.lam, self.warm.lam_x = self.cold.lam, self.cold.lam_x   # as a pair, or not at all
+        if not plan["ok"]:
+            plan, w = self._first_rescue(i0, x0, X, U, mu, plan)
+            # the multipliers only from a window of the warm one's shape (a held one has more rows)
+            same = w is not None and len(w.lbg_all) == len(self.warm.lbg_all)
+            self.warm.lam, self.warm.lam_x = (w.lam, w.lam_x) if same else (None, None)
+            self.cold.lam, self.cold.lam_x = self.warm.lam, self.warm.lam_x
         if not plan["ok"]:
             raise RuntimeError(f"no first plan: {plan['status']}")
         self.plan, self.plan_t0, self.plan_mu = plan, state["t"], self.plan_mu_next
@@ -200,6 +232,62 @@ class Driver:
         self.next_replan = state["t"] + REPLAN_PERIOD
         # the warm solver is built on its first call: do it now, off the clock
         self._replan(state, adopt_now=True)
+
+    def _first_rescue(self, i0, x0, X, U, mu, failed):
+        """The first plan where G from IPOPT's start fails in the cold window's 400 iterations
+        (issue 001: tight low-friction hairpins): G with FIRST_MAX_ITER iterations; then H (the
+        rear axle held at the window's least tyre peak, multistart.held_bound) from cold and G
+        from H's plan (H's own plan if that fails: it is feasible for G's problem too); then D
+        (the synthetic rear-out seed into the first corner ahead) and F into a hairpin. The
+        first feasible plan is adopted, as a re-plan adopts one when G fails. Not under any
+        budget: the car is not moving yet. Returns (plan, the window that made it or None);
+        self.first_rescue records each try."""
+        from race_planner import modes
+        from race_planner.multistart import held_bound
+        from race_planner.track import TYRE_FIELDS
+        v_end, tr = self.v_end(i0), self.track
+        tries = self.first_rescue = [("G", failed["status"], failed["iters"])]
+        kw = {"ds": self.ds, "length": self.length, "grip": self.grip, "warm": False,
+              "max_iter": FIRST_MAX_ITER, "beta_max": self.beta_max,
+              "front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
+              "rear_slip_low": self.rear_slip_low, "free_stages": FREE_STAGES}
+
+        def go(name, w, Xs, Us):
+            Xs = np.array(Xs, float)
+            Xs[:, 0] = x0
+            w.lam = w.lam_x = None
+            p = w.solve(tr, i0, x0, v_end, Xs, np.array(Us, float), mu_scale=mu)
+            tries.append((name, p["status"], p["iters"]))
+            return p
+
+        wg = Window(self.car, **kw)
+        p = go("G+", wg, X, U)
+        if p["ok"]:
+            return p, wg
+        sl = slice(i0, i0 + self.cold.N)
+        peak = min(modes.rear_peak(self.car, self.grip * m, sd, tuple(sf)) for m, sd, sf in zip(
+            tr.mu[sl], tr.sliding[sl], np.vstack([getattr(tr, k)[sl] for k in TYRE_FIELDS]).T))
+        wh = Window(self.car, rear_alpha_max=math.radians(held_bound(peak)), **kw)
+        ph = go("H", wh, X, U)
+        if ph["ok"]:
+            pg = go("G<H", wg, ph["X"], ph["U"])
+            return (pg, wg) if pg["ok"] else (ph, wh)
+        sec = self.cold.section(tr, i0)
+        s_end = float(sec.s[-1])
+        c = next((c for c in modes.corners(tr, self.grip)
+                  if c.s_out > tr.s[i0] and c.s_in < s_end), None)
+        if c is not None:
+            pk = modes.rear_peak(self.car, c.mu, c.sliding, c.surface)
+            seeds = [("Ds", modes.seed_rear_out(X, U, sec, c.s_in, c.s_out, self.car, pk, c.mu,
+                                                c.sign))]
+            if c.hairpin:
+                seeds.append(("F", modes.seed_flick(X, U, sec, c.s_in, c.s_out, self.car, pk,
+                                                    c.mu, c.sign)))
+            for name, (Xs, Us) in seeds:
+                p = go(name, wg, Xs, Us)
+                if p["ok"]:
+                    return p, wg
+        return p, None
 
     def mu_scale(self, state):
         """The car's friction scale where it is (window.friction_scale; 1 without an estimate),
@@ -383,11 +471,21 @@ def run(driver, plant, s_end, rate=50.0, t_max=400.0, half_width=None):
     dt = 1.0 / rate
     result = "timeout"
     half = half_width if half_width is not None else 0.5 * driver.car.width
+    slow_since = None
     while state["t"] < t_max:
         cmd = driver.step(state)
         if driver.stopping and math.hypot(state["vx"], state["vy"]) < 0.5:
             result = "stopped: " + driver.stopping
             break
+        # a car standing still with no stop asked for (roadmap 061 M4b: sideways in mud, its
+        # next plan never adopted, being ahead of it): not a timeout two minutes later
+        if math.hypot(state["vx"], state["vy"]) < STALL_SPEED:
+            slow_since = state["t"] if slow_since is None else slow_since
+            if state["t"] - slow_since > STALL_TIME:
+                result = "stalled"
+                break
+        else:
+            slow_since = None
         state = plant.step(cmd["accel"], cmd["tire_angle"], dt=dt)
         i = state["i"]
         if state["s"] >= s_end:

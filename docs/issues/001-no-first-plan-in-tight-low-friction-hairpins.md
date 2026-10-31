@@ -1,6 +1,6 @@
 # 001: no first plan in two tight low-friction hairpins
 
-**Severity:** medium (the car never starts; no wrong plan is driven). **Status:** open.
+**Severity:** medium (the car never starts; no wrong plan is driven). **Status:** fixed (roadmap 061 M4b).
 
 ## What is wrong
 
@@ -34,9 +34,26 @@ A car that cannot make its first plan at a tight slippery hairpin cannot start t
 slot, a restart after a stop). The receding loop's fallback (the last plan, then any seed's)
 only exists after a first plan.
 
-## Fix (proposed, not made)
+## Fix (proposed)
 
 In `start`, when G fails: more iterations (the first solve has no budget: the car is not
 moving), then H (held at the rear tyre's peak, from cold) and G from H's plan, and with a
 schedule D from the library; adopt the first feasible, as a re-plan does when G fails. The
 extra solves cost only start-up time. A test: both corners above start.
+
+## Fixed (M4b)
+
+`live.Driver.start` (`_first_rescue`): when G from IPOPT's start fails in the cold window, G
+again with 3000 iterations (`FIRST_MAX_ITER`), then H held at the window's least rear peak
+from cold and G from H's plan (H's own if that fails), then D (synthetic) and F into the first
+corner; the first feasible plan is adopted, in every arm alike (no budget: the car waits).
+`self.first_rescue` records the tries. Test: `test_live.py::
+test_a_first_plan_whose_cold_solve_fails_is_rescued_from_more_starts`.
+
+Offline, from the M4 start states: `mud_wet:9:180:15` G and G+ both `Restoration_Failed` at
+181 iterations, H solved in 220, G from H in 45 (12.8 s in all); `ice:9:180:6` G+ solved in
+668 iterations (13.4 s). In the loop (swb `play_log/race_planner/mode_choice/m4b/`, 2 repeats
+an arm) both corners now start in every arm. What follows the start is not this issue's:
+`mud_wet:9:180:15` stalled sideways in every arm on the free planner (issue 002) and finishes in
+every arm with the slip bound (16.91-18.27 s; the oracle 16.22 best, 17.05 held); `ice:9:180:6`
+leaves the road in most runs, every arm, its re-plans cut at the budget (issue 003).

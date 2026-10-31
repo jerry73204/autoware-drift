@@ -138,6 +138,10 @@ class MultiStart:
         self.held, self.h_competes = held, h_competes
         kw = {"ds": d.ds, "length": d.length, "grip": d.grip, "max_iter": max_iter,
               "beta_max": getattr(d, "beta_max", None),
+              "front_slip_max": getattr(d, "front_slip_max", None),
+              "rear_slip_max": getattr(d, "rear_slip_max", None),
+              "rear_slip_low": getattr(d, "rear_slip_low", None),
+              "free_stages": getattr(d, "free_stages", 0),
               "budget": SEED_SHARE * d.budget if seed_budget is None else seed_budget}
         ctx = mp.get_context("spawn")        # a fresh interpreter: no solver state forked
         omp = os.environ.get("OMP_NUM_THREADS")

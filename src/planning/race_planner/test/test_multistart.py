@@ -64,13 +64,19 @@ def test_back_to_grip_by_the_same_gate_or_when_the_slide_is_over():
     assert m.mode == "grip"
 
 
-def drive(track, multistart, s_end, v0=12.0, beta_max=None, plans=None):
+FREE = {"front_slip_max": None, "rear_slip_max": None, "rear_slip_low": None}
+
+
+def drive(track, multistart, s_end, v0=12.0, beta_max=None, plans=None, slips=FREE):
     """The driver with its seeds along `track` on the plans it adopts. Each seed is given 3 s
     rather than 0.9 so that a loaded host cannot cut a seed's solve short and so change the
-    choice; a slow solve only delays its adoption."""
+    choice; a slow solve only delays its adoption. These are the chooser's tests on M3's
+    abstract tyre (one mu, no fall-off past the peak): by default the planner's slips are left
+    free as M3 ran them (`slips`: live.Driver's slip bounds, roadmap 061 M4b; on a surface
+    without fall-off they hold the front at its peak and change which plans exist)."""
     multistart = dict(multistart, seed_budget=3.0)
     c = Car.from_spec(SPEC)
-    d = Driver(c, track, NoTracker(), multistart=multistart, beta_max=beta_max)
+    d = Driver(c, track, NoTracker(), multistart=multistart, beta_max=beta_max, **slips)
     f = PlanFollower(d, 10.0, v0)
     st = f.state()
     try:
