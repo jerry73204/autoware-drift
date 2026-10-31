@@ -153,6 +153,11 @@ class Driver:
     # multiples (window.slip_rows' k_rear_low; None: free): at its peak. Roadmap 061 M4b, issue
     # 003: the plans ran ice's rear on its falling branch, a slide the car cannot be held on
     rear_slip_low: float = 1.0
+    # the driving style (roadmap 065; style.Style, a dict as Style.from_dict reads it, a YAML
+    # path, or None: fastest, S1, today's planner bit for bit). Validated here, refused by name;
+    # a style the planner cannot run yet is refused (NotImplementedError). Changed live by
+    # set_style, applied at the next re-plan outside a committed drift (style_due)
+    style: object = None
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -204,10 +209,85 @@ class Driver:
         self.stopping = None           # why the car is being stopped, once it is
         self.stop_law = SimpleTracker(self.car)
         self.plan_mu = 1.0             # the friction scale the current plan was made with
+        self.style = self.accept_style(self.style)
+        self.style_pending = None      # a style asked for, applied at the next re-plan due
+        self.style_log = []
         self.multi = None
         if self.multistart is not None:
             from race_planner.multistart import MultiStart
             self.multi = MultiStart(self, **self.multistart)
+
+    def accept_style(self, x):
+        """x as a validated style.Style the planner can run: refused by name (ValueError) if it
+        is not a record, S3's slip floor checked against the rear cap on this track's surfaces
+        without fall-off, and NotImplementedError for a style not built yet (roadmap 065 M1:
+        S1 only)."""
+        from race_planner.style import as_style
+        st = as_style(x)
+        if st.name == "drift_max" and self.rear_slip_max is not None:
+            st.check_slip_floor(self._flat_peaks(), self.rear_slip_max)
+        return st.require_implemented()
+
+    def _flat_peaks(self):
+        """The rear tyre's peak (rad) on each surface of the track without fall-off past it
+        (where the rear cap applies), keyed by its first node."""
+        from race_planner import modes
+        from race_planner.track import TYRE_FIELDS
+        t, out, seen = self.track, {}, set()
+        tyre = np.vstack([getattr(t, k) for k in TYRE_FIELDS]).T
+        for i in np.flatnonzero(np.asarray(t.sliding) >= FLAT):
+            key = (round(float(t.mu[i]), 3), round(float(t.sliding[i]), 3),
+                   tuple(np.round(tyre[i], 3)))
+            if key not in seen:
+                seen.add(key)
+                out[f"s {float(t.s[i]):.0f} m"] = modes.rear_peak(
+                    self.car, self.grip * float(t.mu[i]), float(t.sliding[i]), tuple(tyre[i]))
+        return out
+
+    def set_style(self, x, t=None):
+        """Ask for a style (as accept_style takes it): validated now, refused now (the current
+        style kept), applied at the next re-plan that is not within multistart.AHEAD of a
+        committed drift (style_due)."""
+        st = self.accept_style(x)
+        self.style_pending = st
+        self.style_log.append({"t": t, "event": "requested", "style": st.name})
+        return st
+
+    def committed_drift(self, s):
+        """The corner whose slide the adopted plan has committed to, if the car at s is within
+        multistart.AHEAD of it or in it (design 065, call 8: the slide as MultiStart._slides_in
+        defines it, from CORNER_FROM before the turn-in to the exit), else None."""
+        from race_planner import modes
+        from race_planner.multistart import AHEAD, CORNER_FROM, past_of, slides_in
+        if self.plan is None:
+            return None
+        if getattr(self, "_corners", None) is None:
+            self._corners = modes.corners(self.track, self.grip)
+        near = [c for c in self._corners
+                if c.s_in - CORNER_FROM - AHEAD <= s <= c.s_out
+                and c.s_out >= self.plan["s"][0] and c.s_in - CORNER_FROM <= self.plan["s"][-1]]
+        if not near:
+            return None
+        past = self.plan.get("past")
+        if past is None:               # a plan not classified (one start): at the map's friction
+            past = past_of(self.car, self.track, self.grip, self.plan, None)
+        return next((c for c in near if slides_in(self.plan, c, past)), None)
+
+    def style_due(self, state):
+        """Apply the style asked for, unless a committed drift is near (then deferred to a later
+        re-plan). Returns the event, or None with nothing pending."""
+        if self.style_pending is None:
+            return None
+        c = self.committed_drift(state["s"])
+        ev = {"t": state["t"], "s": round(float(state["s"]), 2), "style": self.style_pending.name}
+        if c is not None:
+            self.style_log.append(dict(ev, event="deferred", corner=float(c.s_in)))
+            return "deferred"
+        self.style, self.style_pending = self.style_pending, None
+        if self.multi is not None:
+            self.multi.style = self.style
+        self.style_log.append(dict(ev, event="applied"))
+        return "applied"
 
     def close(self):
         """The seed processes stopped (multistart only)."""
@@ -403,6 +483,7 @@ class Driver:
     def _replan(self, state, adopt_now=False):
         # the window starts where the car will be when the plan is adopted, a fixed latency (the
         # budget) from now, in the state predicted for then
+        self.style_due(state)          # a style asked for takes effect here, or waits
         lead_t = 0.0 if adopt_now else self.budget
         s0, x0 = (state["s"], self.x_of(state)) if adopt_now else self.predict(state, lead_t)
         i0 = self.node(s0)

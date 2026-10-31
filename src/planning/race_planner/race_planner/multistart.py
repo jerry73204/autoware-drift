@@ -48,6 +48,27 @@ SEED_LEAD = 10.0      # m: a corner is seeded only while its turn-in is this far
 CORNER_FROM = 30.0    # m before the turn-in a corner's slide may start (the seeds' D_FROM is 25)
 
 
+def past_of(car, track, grip, plan, mu):
+    """The plan's rear axle past its tyre's peak at each node (rad; modes.past_peak), at the
+    planner's friction there (mu: the window's scale, None for 1)."""
+    N = plan["X"].shape[1]
+    sl = slice(plan["i0"], plan["i0"] + N)
+    mu_eff = grip * track.mu[sl] * (1.0 if mu is None else np.asarray(mu)[:N])
+    return modes.past_peak(car, plan["X"], mu_eff, track.sliding[sl],
+                           np.vstack([getattr(track, k)[sl] for k in TYRE_FIELDS]))
+
+
+def slides_in(plan, c, past=None):
+    """Whether the plan slides in corner c (its own slide carried on into it): its rear axle
+    modes.REAR_PAST past the peak from CORNER_FROM before c's turn-in to c's exit. past: the
+    plan's (default plan["past"], set by MultiStart.classify)."""
+    if plan is None or c is None:
+        return False
+    past = plan["past"] if past is None else past
+    return bool(np.any((past >= modes.REAR_PAST) & (plan["s"] >= c.s_in - CORNER_FROM)
+                       & (plan["s"] <= c.s_out)))
+
+
 def _worker(conn, car, track, kw, cpus, held=None):
     """A seed's process: one Window (or, for H, one per bound in `held`, degrees: the rear
     axle's slip angle held within it), solving what it is sent until it is sent None."""
@@ -106,7 +127,7 @@ class MultiStart:
 
     def __init__(self, driver, threshold=THRESHOLD, confirm=CONFIRM, ahead=AHEAD, flick=False,
                  seed_budget=None, max_iter=400, cpus=None, library=True, schedule=None,
-                 perception=None, h_competes=False):
+                 perception=None, h_competes=False, style=None):
         """schedule (roadmap 061 M3b): None, M3's fixed starts ({G, D}, F with `flick`, G in a
         process of its own); else the starts chosen per re-plan by a schedule.Scheduler built
         from this dict (its keyword arguments: table, a track.SurfaceTable, default swb's;
@@ -115,8 +136,14 @@ class MultiStart:
         and lower the planned friction near the car (scheduled only). h_competes: H's plan
         weighed by the gate like the others; by default (False) it is the fallback, adopted only
         when no free start (G, D, F) has a feasible plan (M3b's chain check: as a competitor it
-        held the grip mode on a slower plan wherever the free G slid by itself, Tsukuba +0.55 %)."""
+        held the grip mode on a slower plan wherever the free G slid by itself, Tsukuba +0.55 %).
+        style (roadmap 065): a style.Style (or what style.as_style takes); None, the driver's
+        (live.Driver.style), else fastest. M1 runs S1 only (NotImplementedError for the rest);
+        S1 is this class unchanged."""
         d = driver
+        from race_planner.style import as_style
+        self.style = as_style(getattr(d, "style", None) if style is None else style)
+        self.style.require_implemented()
         self.car, self.track, self.grip = d.car, d.track, d.grip
         self.threshold, self.confirm, self.ahead = threshold, confirm, ahead
         self.scheduler, self.perception = None, perception
@@ -205,9 +232,7 @@ class MultiStart:
 
     def _slides_in(self, plan, c):
         """Whether the plan slides in corner c (its own slide carried on into it)."""
-        return plan is not None and c is not None and bool(np.any(
-            (plan["past"] >= modes.REAR_PAST) & (plan["s"] >= c.s_in - CORNER_FROM)
-            & (plan["s"] <= c.s_out)))
+        return slides_in(plan, c)
 
     def corner_ahead(self, s0, s_end):
         """The first corner whose turn-in is SEED_LEAD or more ahead of s0 and 40 m or more
