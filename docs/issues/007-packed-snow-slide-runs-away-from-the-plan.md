@@ -69,3 +69,31 @@ was switched from drift to grip at s 1236 for want of a drift plan: D's cut solv
 infeasible by the free stages' rows). One M4c run (always r1) drove it with the steering at its
 lock for 1.3 s (s 1200-1213: the car at 1.5-5 deg against the plan's 9.7, 1.0 m wide of the
 plan): the hairpin is still driven at the steering's limit.
+
+## Result (2026-10-31; swb `play_log/race_planner/mode_choice/i007/`)
+
+| | before (M4c `m4c2`) | after |
+|---|---|---|
+| packed snow, single | 10 of 12 | 12 of 12 (`gate2`, final code, load 6.7-7.2); 12 of 12 (`gate` rep 2, load 6.1-6.6); `gate` rep 1 11 of 12: R 9 x 180 at 15 m off the road at load 8, its L1 solves cut at the budget (p50 1.00 s, 4 of 9 failed, plan at 32 deg; the same corner under `RP_DET` finishes) |
+| packed snow, sched / always | 10 / 9 of 12 | 12 / 12 (`gate`, first form of the fix, load 5-9) |
+| R 25 x 90 / R 15 x 90 at 15 m | lost in every arm | finished in every arm and run (car 5.9-8.1 deg against the plans' 6.1-6.4) |
+| loose snow | 36 of 36 | 36 of 36 (`gate2`) |
+| ice, single | 8 of 12 | 11 of 12 (`gate2`), 10 of 12 (`gate`): one repeat each, not an effect claimed |
+| Haruna, Tsukuba (`RP_DET`, single) | 76.28 s, 74.33 s | the same, plan and trajectory digests equal (`digest/`) |
+
+The `gate` batch ran the first form of the fix (the weight a symbolic expression in the stage's
+friction: the same weights, other last bits); the final form's multi-start packed-snow batch
+was stopped at 3 of 12 per arm (all finished) when another session's build took the host to
+load 25-133 for over an hour.
+
+## For L2 holding big slides (roadmap 065)
+
+- L2's model is not what limits it far past the rear's peak: its one-stage sideslip prediction
+  held to 0.5 deg at 56 deg of slide, and converged SQP chose the same as RTI.
+- What decides is the cost's balance: a slide is held only if no other term buys more with it.
+  Tighter sideslip and yaw-rate scales alone (vy 0.3, r 0.15, weights x7 and x4) did not save
+  R 15 x 90 with the line at 0.2 m; loosening the speed made it worse. A style that holds a big
+  slide needs the line (and probably xi) to give way where the tyres cannot move the car across
+  the road within the horizon, not only heavier beta and r.
+- Scales are best stated as what the car can correct in the horizon (here, lateral authority ~
+  mu g), not as constants tuned on asphalt.
