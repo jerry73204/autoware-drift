@@ -194,3 +194,19 @@ def test_a_front_slip_bound_holds_in_multiples_of_the_peak_where_the_surface_doe
     assert front(ph).max() <= k * tp * (1 + 1e-3)
     assert front(pf).max() > k * tp                                   # it binds
     assert ph["time"] >= pf["time"] - 1e-3
+
+
+def test_the_free_stages_slip_rows_are_not_counted_against_a_plan():
+    """Issue 006: a window whose first stages are free of the slip rows (the car's own state may
+    be past a bound) does not count those rows in its plan's violation."""
+    c = car()
+    t = road(lambda s: 0.0, 160.0, ds=4.0, w=4.0)
+    w = Window(c, ds=4.0, length=160.0, warm=False, grip=1.0, front_slip_max=0.3,
+               free_stages=3)
+    X, U = initial(t, c, v_start=18.0)
+    x0 = X[:, 0].copy()
+    x0[0], x0[5] = 18.0, 0.06                  # the front wheels steered off the travel
+    X[:, 0] = x0
+    p = w.solve(t, 0, x0, 60.0, X, U)
+    assert p["ok"], p["status"]
+    assert p["violation"] < 1e-2, p["violation"]

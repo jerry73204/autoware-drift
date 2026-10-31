@@ -387,6 +387,7 @@ class Window:
         # car's state and the next, which may already be past a bound (a car sliding past its
         # peak made every held window infeasible from there on, H the fallback with it: issue
         # 003); the plan must come back within the bound, not start there
+        self.free_stages, self.nk = min(free_stages, M), nk
         for k in range(min(free_stages, M)):
             lo = k * per
             for i in list(range(lo + 6 + ng - nk, lo + 6 + ng)) + list(range(lo + 6 + ng + 2,
@@ -549,7 +550,10 @@ class Window:
             seg.append(float(tk))
             gap = max(gap, float(np.max(np.abs(np.asarray(xn).ravel() - Xv[:, k + 1]))))
             gv = np.asarray(self.g(Xv[:, k], Uv[:, k], P[:, k])).ravel()
-            over = max(over, float(np.max(np.maximum(gv - self.ubg, self.lbg - gv))))
+            viol = np.maximum(gv - self.ubg, self.lbg - gv)
+            if k < getattr(self, "free_stages", 0) and self.nk:
+                viol = viol[:-self.nk]          # the slip rows the first stages are free of
+            over = max(over, float(np.max(viol)))
         # a solve stopped by its budget or its iterations is still a plan if it is feasible:
         # the car is better off with it than with the last one (re-solved next second anyway)
         feasible = gap < 1e-2 and over < 1e-2
