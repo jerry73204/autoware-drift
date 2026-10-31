@@ -129,7 +129,7 @@ def _load():
 
 
 def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=None, rules=None,
-        sd=None, tag="", beta_max=None):
+        sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None):
     car = Car.from_spec(e1.SPEC)
     if sd is not None:
         import race_planner.surface as sf
@@ -149,7 +149,10 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
     plant.reset(s=s0, speed=v0)
     d = Driver(car, planner, Tracker(car, planner, grip=GRIP), ds=DS, grip=GRIP, multistart=ms,
                use_estimate=est, estimator=FrictionEstimate() if est else None,
-               beta_max=None if beta_max is None else math.radians(beta_max))
+               beta_max=None if beta_max is None else math.radians(beta_max),
+               **({} if front is None else {"front_slip_max": None if front <= 0 else front}),
+               **({} if rear is None else {"rear_slip_max": None if rear <= 0 else rear}),
+               **({} if rear_low is None else {"rear_slip_low": None if rear_low <= 0 else rear_low}))
     s_end = (span[1] + 10.0) if span else float(planner.s[-1]) - 10.0
     load0, c0 = _load(), time.time()
     v_used = v0
@@ -187,7 +190,9 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
     if out.get("result") == "done":
         t_course = float(out["t"])
     res = {"course": name, "arm": arm, "err": err, "seed": seed, "perc": perc, "est": est,
-           "rep": rep, "tag": tag, "rules": rules, "sd": sd, "beta_bound": beta_max, "info": info,
+           "rep": rep, "tag": tag, "rules": rules, "sd": sd, "beta_bound": beta_max,
+           "front_slip_max": d.front_slip_max, "rear_slip_max": d.rear_slip_max,
+           "rear_slip_low": d.rear_slip_low, "info": info,
            "v0": v0,
            "v_start_used": v_used,
            "result": out.get("result"), "t": out.get("t"), "s": out.get("s"),
@@ -775,6 +780,13 @@ def main():
     ap.add_argument("--sd", type=float, default=None)
     ap.add_argument("--tag", default="")
     ap.add_argument("--beta", type=float, default=None, help="L1's sideslip bound, deg")
+    ap.add_argument("--front", type=float, default=None,
+                    help="L1's front slip bound, times the surface's peak (live.Driver's "
+                         "front_slip_max; default the Driver's, 0 free)")
+    ap.add_argument("--rear", type=float, default=None,
+                    help="L1's rear slip bound, as --front (rear_slip_max)")
+    ap.add_argument("--rear-low", type=float, default=None,
+                    help="L1's rear slip bound on slippery fall-off classes (rear_slip_low)")
     a = ap.parse_args()
     cpus = [int(x) for x in a.cpus.split(",") if x] or None
     if cpus:
@@ -789,7 +801,7 @@ def main():
         print("\n".join(corner_courses()))
         return
     return run(a.course, a.arm, a.err, a.seed, a.perc, a.est, a.rep, cpus[1:] if cpus else None,
-               json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta)
+               json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low)
 
 
 if __name__ == "__main__":

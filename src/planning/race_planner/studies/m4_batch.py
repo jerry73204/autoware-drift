@@ -4,6 +4,8 @@ at a time over all four (the driver on the first, the seeds on the rest). A job 
 already there is skipped, so a batch can be re-run.
 
 Run: env -u PYTHONPATH .venv/bin/python studies/m4_batch.py <batch> [--cores 8,9,10,11]
+     [--reps 1,2] [--match <part of a result name>,...] [--max-load 6]
+Results go to M4_OUT (default swb's play_log/race_planner/mode_choice/m4; M4b's: .../m4b).
 """
 import argparse
 import os
@@ -20,11 +22,14 @@ import mode_choice_m4 as m4  # noqa: E402
 PY = sys.executable
 
 
-def jobs(batch, reps=(1, 2), beta=45.0):
-    """[(kind, argv, result path)]: kind 1 one process, 4 multi-start."""
+def jobs(batch, reps=(1, 2), beta=45.0, gtag="", gextra=()):
+    """[(kind, argv, result path)]: kind 1 one process, 4 multi-start. gtag, gextra: a tag and
+    arguments every job of the batch gets (its own first)."""
     out = []
 
     def add(course, arm, err=0, seed=0, perc=False, est=False, rep=1, tag="", extra=()):
+        tag = "_".join(x for x in (tag, gtag) if x)
+        extra = list(extra) + list(gextra)
         key = m4.run_key(course, arm, err, seed, perc, est, rep, tag)
         argv = ["run", course, "--arm", arm, "--err", str(err), "--seed", str(seed),
                 "--rep", str(rep)] + (["--perc"] if perc else []) + (["--est"] if est else []) \
@@ -36,12 +41,12 @@ def jobs(batch, reps=(1, 2), beta=45.0):
             out.append((1, ["oracle", c], os.path.join(m4.OUT, "oracle",
                                                        c.replace(":", "_") + ".json")))
     elif batch == "corners":
-        for rep in (1, 2):
+        for rep in reps:
             for c in m4.corner_courses():
                 for arm in ("single", "sched", "always"):
                     add(c, arm, rep=rep)
     elif batch == "zones":
-        for rep in (1, 2):
+        for rep in reps:
             for arm in ("single", "always", "sched"):
                 add("zones", arm, rep=rep)
             add("zones", "sched", est=True, rep=rep)
@@ -51,6 +56,11 @@ def jobs(batch, reps=(1, 2), beta=45.0):
                     add("zones", arm, err, seed)
                 add("zones", "sched", err, seed, perc=True)
                 add("zones", "sched", err, seed, perc=True, est=True)
+    elif batch == "i001":         # issue 001's corners
+        for rep in reps:
+            for c in ("c:mud_wet:9:180:15", "c:ice:9:180:6"):
+                for arm in ("single", "sched", "always"):
+                    add(c, arm, rep=rep)
     elif batch == "dry":
         for rep in reps:
             for c in ("haruna", "tsukuba"):
@@ -90,9 +100,18 @@ def main():
                          "under others' load cuts solves at the budget)")
     ap.add_argument("--reps", default="1,2")
     ap.add_argument("--beta", type=float, default=45.0, help="batch beta: the bound, deg")
+    ap.add_argument("--tag", default="", help="a tag every job's result name gets")
+    ap.add_argument("--extra", default="", help="arguments every job gets (one string)")
+    ap.add_argument("--match", default="",
+                    help="only the jobs whose result name holds one of these (comma-separated)")
     a = ap.parse_args()
     cores = [int(x) for x in a.cores.split(",")]
-    todo = [j for j in jobs(a.batch, tuple(int(x) for x in a.reps.split(",")), a.beta) if not os.path.exists(j[2])]
+    todo = [j for j in jobs(a.batch, tuple(int(x) for x in a.reps.split(",")), a.beta,
+                            a.tag, a.extra.split())
+            if not os.path.exists(j[2])]
+    if a.match:
+        keys = a.match.split(",")
+        todo = [j for j in todo if any(k in os.path.basename(j[2]) for k in keys)]
     print(len(todo), "jobs", flush=True)
     os.makedirs(m4.OUT, exist_ok=True)
     logdir = os.path.join(m4.OUT, "logs")
