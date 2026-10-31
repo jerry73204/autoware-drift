@@ -2,7 +2,10 @@
 
 Date: 2026-10-29. Status: **revision 3** (2026-10-30): built and driven in roadmap 060;
 revision 3 (section 4.4a, listed in section 10) replaces "several warm starts" with starts
-chosen from what lies ahead, from roadmap 061's measurements. The user decided the
+chosen from what lies ahead, from roadmap 061's measurements. Revision 4 (2026-10-31,
+section 11) adds a driving-style layer above the planner (fastest lap, drift when cheap,
+drift everywhere), designed in
+[2026-10-31-drift-style-layer-design.md](2026-10-31-drift-style-layer-design.md). The user decided the
 shape ("a live planning/tracking system that runs in real time: seconds to compute a
 medium-range plan, and another part to update the route and the control when the vehicle
 drifts"); everything else is *ours*, argued below, and open to change. It revises
@@ -451,3 +454,20 @@ proving ground or the first track, and never per corner.
 | L1 keeps the front axle within its peak and the rear within three times it, on surfaces without fall-off | the free plan plowed the front at 9-21 times its peak into the mud hairpin, every tyre saturated, a slide no controller holds: every arm stopped there (6 of 6); bounded, none (0 of 6), the car's largest sideslip below its plans' (23-32 against 27-36 deg; 061 M4b, issue 002) |
 | the first plan rescued from more starts when G fails (3000 iterations, H then G from H, D, F) | two tight low-friction hairpins had no first plan in any arm; offline both had plans from H or past 400 iterations (061 M4b, issue 001) |
 | solver levers: fewer iterations, then Fatrop, SQP on HPIPM, MUMPS tuning; no HSL, no GPU under the solver | user's ruling; the measured cost split; a GPU loses at ~1000 variables |
+
+## 11. Revision 4: a driving style above the planner (roadmap 065)
+
+The user, 2026-10-31: "the behavior should be adjustable. The solver can go fastest lap, drift
+for little trade off or always making drift if possible even on straight roads", and "The style
+or behavior is like a layer we can decide the combinations". The layer is specified in
+[2026-10-31-drift-style-layer-design.md](2026-10-31-drift-style-layer-design.md), from the
+evidence in [drift-style.md](../../drift-style.md); built and measured in roadmap 065.
+
+| change | why |
+|---|---|
+| a style record (S1 `fastest`, S2 `drift_budget`, S3 `drift_max`) chooses the formulation each piece runs: offline data, schedule (4.4a), L1 rows, gate, L2 weights; L1's objective stays minimum time in every style | a drift reward in the cost cannot reach every trade-off on a non-convex problem, holds no single weight across re-plans, and pays the plan to sit on the slip cap (issue 002); every source that defines a drift well defines it as constraints chosen upstream |
+| S1 is this design unchanged, bit for bit | the fastest lap must not pay for the layer |
+| S2: the drift map stores signed losses; a lap budget (seconds) spent offline by a knapsack; a lex-epsilon gate (plans within 1 + eps of the fastest, the one that drifts most) on classes without fall-off | on asphalt the cheapest drift (Haruna's hairpins, 0.09 s a lap) is per window the size of the 0.3 % noise, so the live gate cannot price it |
+| S3: an offline zone plan (where, which way, switch points); elastic L1 rows in zones (rear-slip floor, speed floor, swing rate, no-return); a manji seed M on straights; heavier L2 weights on sideslip and yaw rate; fallback to grip, then stop | drift direction is discrete and a gradient cannot choose it; D1 scores speed x angle, so minimum time inside floors is D1's own task |
+| section 5's failure table, the grip share, edge margins, slip caps, ice rule, friction quantile and estimator rules are not style fields; a style may only tighten them, and a record that breaks one is refused by name | no style buys drift with safety |
+
