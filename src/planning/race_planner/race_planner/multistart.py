@@ -244,6 +244,8 @@ class MultiStart:
         g_from = adopted if adopted.get("mode", "grip") == "grip" else self.last["G"]
         if g_from is None:                   # G's own failed: the adopted plan is still warm
             g_from = adopted
+        if d.cut is not None:                # G's last solve cut near feasible (issue 005)
+            g_from = d.cut
         d.warm.lam = d.warm.lam_x = None     # the seeds' base: no multipliers to shift here
         base = warm_from(d.warm, g_from, i0, x0, self.track)
         starts = {"G": {"plan": g_from}}
@@ -262,6 +264,8 @@ class MultiStart:
             self.conns[slot].send((i0, x0, v_end, mu, st))
         res = {slot: self.conns[slot].recv() for slot in starts}
         wall = time.time() - c
+        from race_planner.live import cut_iterate
+        d.cut = cut_iterate(res["G"]) if "G" in res else None
         for slot in self.slots:
             r = res.get(slot)
             self.last[slot] = r if r is not None and r["ok"] else None
@@ -384,6 +388,8 @@ class MultiStart:
         g_from = adopted if adopted.get("mode", "grip") == "grip" else self.last["G"]
         if g_from is None:
             g_from = adopted
+        if d.cut is not None:                # G's last solve cut near feasible (issue 005)
+            g_from = d.cut
         starts, kinds = {}, {}
         if want - {"G"}:
             keep = d.warm.lam, d.warm.lam_x
@@ -418,6 +424,8 @@ class MultiStart:
         Xw, Uw = warm_from(d.warm, g_from, i0, x0, self.track)
         g = d.warm.solve(self.track, i0, x0, v_end, Xw, Uw, mu_scale=mu)
         g["lam"], g["lam_x"] = d.warm.lam, d.warm.lam_x
+        from race_planner.live import cut_iterate
+        d.cut = cut_iterate(g)
         res = {"G": g}
         kinds["G"] = "adopted" if g_from is adopted else "own"
         res.update({slot: self.conns[slot].recv() for slot in starts})

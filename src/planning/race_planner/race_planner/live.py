@@ -53,6 +53,18 @@ def plan_at(plan, s):
     return X, a, t
 
 
+CUT_WARM = 0.2    # a cut solve this near feasible (rows, shooting gap) warms the next (issue 005)
+
+
+def cut_iterate(r):
+    """r, a solve's result, if it is a solve cut short (budget or iterations) whose iterate is
+    near feasible: the next solve starts from it, not from the adopted plan (issue 005); else
+    None. Never adopted."""
+    if r["ok"] or r.get("violation", 1.0) > CUT_WARM or r.get("defect", 1.0) > CUT_WARM:
+        return None
+    return r
+
+
 def warm_from(window, plan, i0, x0, track):
     """The warm start for `window` from node i0 at state x0: `plan` shifted to it (window.warm,
     the window's multipliers shifted with it) while it still covers enough of the window, else
@@ -183,6 +195,7 @@ class Driver:
         self.next_replan = 0.0
         self.busy_until = 0.0          # L1's core is busy with a solve until then
         self.solves = []
+        self.cut = None                # the last G solve's iterate, if cut near feasible
         self.fails = 0                 # failed solves in a row
         self.stopping = None           # why the car is being stopped, once it is
         self.stop_law = SimpleTracker(self.car)
@@ -391,8 +404,10 @@ class Driver:
         i0 = self.node(s0)
         mu = self.mu_ahead(state, i0)
         if self.multi is None:
-            Xw, Uw = warm_from(self.warm, self.plan, i0, x0, self.track)
+            src = self.plan if self.cut is None else self.cut
+            Xw, Uw = warm_from(self.warm, src, i0, x0, self.track)
             new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw, mu_scale=mu)
+            self.cut = cut_iterate(new)
             wall = new["solve_s"]
         else:                            # every seed at once; the wall time is the slowest's
             new, wall = self.multi.replan(self, i0, x0, self.v_end(i0), mu)

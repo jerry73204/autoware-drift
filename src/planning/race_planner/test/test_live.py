@@ -174,3 +174,14 @@ def test_no_reading_in_a_planned_slide():
     d.plan = plan(0.0)                                # a grip plan, the car sliding 5 deg
     assert d.mu_scale(state(0.1, 5.0)) < 0.5
     d.close()
+
+
+def test_a_cut_solve_warms_the_next():
+    """Issue 005: a solve cut at the budget near feasible is the next solve's warm start (never
+    adopted); a far one, or a plan, is not."""
+    from race_planner.live import cut_iterate
+    cut = {"ok": False, "violation": 0.1, "defect": 0.01}
+    assert cut_iterate(cut) is cut
+    assert cut_iterate({"ok": False, "violation": 0.3, "defect": 0.002}) is None
+    assert cut_iterate({"ok": False, "violation": 0.01, "defect": 0.5}) is None
+    assert cut_iterate({"ok": True, "violation": 0.0, "defect": 0.0}) is None
