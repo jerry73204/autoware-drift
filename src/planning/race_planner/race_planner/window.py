@@ -240,6 +240,25 @@ def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
     return ca.Function("g", [x, u, p], [ca.vertcat(*rows)])
 
 
+KAPPA_ROWS = [ROWS.index(n) for n in ("kappa_rl", "kappa_rr", "kappa_fl", "kappa_fr")]
+
+
+def kappa_rows_by_peak(g):
+    """g(x, u, p) with each wheel's slip-ratio row in the surface's own longitudinal peak where
+    that peaks at a smaller slip than the rig's (over p[6], model.tyre's peak share, where it is
+    below 1): KAPPA_MAX and FRONT_KAPPA_UP as many of the surface's peaks as of the rig's.
+    Ice peaks at 0.05, a fifth of the rig's slip: KAPPA_MAX was twelve of its peaks, far onto
+    the flat of its fall-off, where the slope rows have no gradient and IPOPT's iterate,
+    wandered there, stopped locally infeasible (issue 008). The reference surface (share 1)
+    and any surface peaking later: the rows unchanged."""
+    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", NU), ca.SX.sym("p", NP)
+    rows = g(x, u, p)
+    sc = ca.SX.ones(rows.shape[0])
+    for i in KAPPA_ROWS:
+        sc[i] = 1.0 / ca.fmin(p[6], 1.0)
+    return ca.Function("g", [x, u, p], [rows * sc])
+
+
 def rk4(f, x, u, p, h):
     k1, t1 = f(x, u, p)
     k2, t2 = f(x + 0.5 * h * k1, u, p)
@@ -315,7 +334,7 @@ class Window:
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
                  tol=1e-3, budget=None, warm=True, compile=True, ipopt=None, beta_max=None,
                  rear_alpha_max=None, front_slip_max=None, rear_slip_max=None,
-                 rear_slip_low=None, free_stages=0):
+                 rear_slip_low=None, free_stages=0, kappa_by_peak=True):
         """beta_max: the body's sideslip, |atan(vy / vx)|, at most this (rad) at every node, the
         last one's END_SLIP with it; rear_alpha_max: the rear axle's slip angle, |atan((vy - lr
         r) / vx)|, at most this. None (the live planner's) leaves either free. Each is two linear
@@ -343,6 +362,8 @@ class Window:
         self.N = N = int(round(length / ds)) + 1
         self.M = M = N - 1
         self.f, self.g, lbg, ubg, self.out = node_functions(car, tyres=True)
+        if kappa_by_peak:                        # issue 008
+            self.g = kappa_rows_by_peak(self.g)
         self.rear_slip_low = rear_slip_low
         nk = (front_slip_max is not None) + (rear_slip_max is not None or
                                               rear_slip_low is not None)

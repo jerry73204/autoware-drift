@@ -210,3 +210,23 @@ def test_the_free_stages_slip_rows_are_not_counted_against_a_plan():
     p = w.solve(t, 0, x0, 60.0, X, U)
     assert p["ok"], p["status"]
     assert p["violation"] < 1e-2, p["violation"]
+
+
+def test_the_slip_ratio_rows_are_in_the_surfaces_own_peak_where_it_peaks_earlier():
+    """Issue 008: ice peaks at a fifth of the rig's slip; KAPPA_MAX in the rig's slip put its
+    rows twelve of ice's peaks out, on the flat of the fall-off. The rows are over the surface's
+    peak share where that is below 1, unchanged on the reference surface and later peaks."""
+    from race_planner.window import KAPPA_ROWS, kappa_rows_by_peak, node_functions
+    c = car()
+    _, g, _, _, _ = node_functions(c, tyres=True)
+    gk = kappa_rows_by_peak(g)
+    x = [15.0, 0.3, 0.1, 0.0, 0.0, 0.02]
+    u = [0.0, 1.0, 1.0, 1.5, 16.0, 14.8, 14.9]
+    for share, scale in ((1.0, 1.0), (1.17, 1.0), (0.196, 1 / 0.196)):
+        p = [0.0, 1.0, 0.0, 0.8, 1.0, 1.0, share, 1.0]
+        a, b = np.asarray(g(x, u, p)).ravel(), np.asarray(gk(x, u, p)).ravel()
+        other = [i for i in range(len(a)) if i not in KAPPA_ROWS]
+        assert np.array_equal(a[other], b[other])
+        assert np.allclose(b[KAPPA_ROWS], a[KAPPA_ROWS] * scale, rtol=1e-12)
+        if scale == 1.0:
+            assert np.array_equal(a, b)
