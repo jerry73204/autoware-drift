@@ -240,7 +240,8 @@ class Driver:
         from H's plan (H's own plan if that fails: it is feasible for G's problem too); then D
         (the synthetic rear-out seed into the first corner ahead) and F into a hairpin. The
         first feasible plan is adopted, as a re-plan adopts one when G fails. Not under any
-        budget: the car is not moving yet. Returns (plan, the window that made it or None);
+        budget: the car is not moving yet. Last, G with the slip bounds off. Returns (plan, the
+        window that made it or None);
         self.first_rescue records each try."""
         from race_planner import modes
         from race_planner.multistart import held_bound
@@ -287,6 +288,15 @@ class Driver:
                 p = go(name, wg, Xs, Us)
                 if p["ok"]:
                     return p, wg
+        if any(kw[k] is not None for k in ("front_slip_max", "rear_slip_max", "rear_slip_low")):
+            # last: G with the slip bounds off (a step in the surface's peak, asphalt onto ice,
+            # left the bounded window locally infeasible at the zone's first node, every start
+            # alike: M4b's 30 % maps); the re-plans bring the plan back within them
+            wf = Window(self.car, **dict(kw, front_slip_max=None, rear_slip_max=None,
+                                          rear_slip_low=None))
+            p = go("G free", wf, X, U)
+            if p["ok"]:
+                return p, wf
         return p, None
 
     def mu_scale(self, state):
