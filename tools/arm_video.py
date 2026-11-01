@@ -5,6 +5,7 @@ choice (`single`, the fastest-lap start alone; `sched`, drift starts where the s
 comparing them. 1920x1080, Pillow + numpy + ffmpeg, no ROS.
 
     tools/arm_video.py <out dir> --arm single=<run> --arm sched=<run> --arm always=<run>
+    tools/arm_video.py <out dir> --arm fastest=<run> --arm s2=<run>      (driving styles)
         [--map <course dir>] [--title S] [--fps 25] [--from S] [--to S] [--speed 1]
 
 A run is either
@@ -51,6 +52,10 @@ ARM_C = {"single": (95, 170, 255), "sched": (255, 200, 70), "always": (235, 95, 
 ARM_TEXT = {"single": "single: grip, the fastest-lap start alone",
             "sched": "sched: drift starts where the surface rule says",
             "always": "always: every start every re-plan"}
+# driving styles (roadmap 065): the same course, fastest lap against drift where it costs little
+ARM_C.update({"fastest": (95, 170, 255), "s2": (255, 150, 40)})
+ARM_TEXT.update({"fastest": "fastest: the fastest lap (S1)",
+                 "s2": "drift_budget: drift where it costs little (S2)"})
 SEED_TEXT = {"G": "G (warm start)", "H": "H (held at the peak)", "D": "D (drift seed)",
              "F": "F (flick seed)"}
 SLID_DEG = 5.0
@@ -328,11 +333,11 @@ def panel(img, run, T, box, ref, scale):
     d.text((x0 + 8, y0 + 73), f"seed {SEED_TEXT.get(slot, slot)}", fill=col, font=font(15))
     d.rectangle((x1 - 200, y0, x1, y0 + 54), fill=(0, 0, 0))
     d.text((x1 - 192, y0 + 4), f"s {run.s[i]:6.0f} m", fill=FG, font=font(16, MONO))
-    if run.arm != "single" and ref is not None:
+    if ref is not None and run is not ref:
         ta, tr = run.time_to(run.s[i]), ref.time_to(run.s[i])
         if ta is not None and tr is not None:
             g = ta - tr
-            d.text((x1 - 192, y0 + 28), f"vs single {g:+.2f} s",
+            d.text((x1 - 192, y0 + 28), f"vs {ref.arm} {g:+.2f} s",
                    fill=(120, 230, 120) if g < 0 else (255, 120, 110), font=font(16, MONO))
     if ended:
         msg = ("FINISHED" if run.finished() else "STOPPED: " + str(run.result)) + \
@@ -350,11 +355,11 @@ class Strip:
 
     def __init__(self, runs, s0, s1, y0):
         self.runs, self.s0, self.s1, self.y0 = runs, s0, s1, y0
-        self.boxes = [(20 + k * COL, y0 + 34, (k + 1) * COL - 14, H - 46) for k in range(3)]
+        self.boxes = [(20 + k * (W // 3), y0 + 34, (k + 1) * (W // 3) - 14, H - 46) for k in range(3)]
         bmax = max(10.0, max(float(np.max(np.abs(r.beta))) for r in runs.values()))
         self.ranges = [(-bmax * 1.05, bmax * 1.05), (0.0, max(float(np.max(r.v)) for r in
                                                                 runs.values()) * 3.6 * 1.08)]
-        self.ref = runs.get("single")
+        self.ref = next(iter(runs.values()))
         gaps = []
         for r in runs.values():
             if r is not self.ref and self.ref is not None:
@@ -364,7 +369,7 @@ class Strip:
         gm = max([1.0] + gaps) * 1.1
         self.ranges.append((-gm, gm))
         self.titles = ["sideslip (deg) vs distance", "speed (km/h) vs distance",
-                       "time gap to single at equal distance (s; < 0 ahead)"]
+                       f"time gap to {self.ref.arm} at equal distance (s; < 0 ahead)"]
         self.base = self._base()
 
     def gap(self, r):
@@ -432,7 +437,7 @@ class Strip:
                 d.line([(xx, b[1]), (xx, b[3])], fill=c)
         b = self.boxes[2]
         yy = float(self.Y(b, 2, 0.0))
-        d.line([(b[0], yy), (b[2], yy)], fill=ARM_C["single"], width=1)
+        d.line([(b[0], yy), (b[2], yy)], fill=ARM_C[self.ref.arm], width=1)
 
 
 def frame(runs, T, strip, title, sub, cam_h, scale):
@@ -442,7 +447,7 @@ def frame(runs, T, strip, title, sub, cam_h, scale):
     d.text((20, 40), sub, fill=DIM, font=font(16))
     tt = f"t = {T:6.2f} s since the planner took the car (panels synced by sim time)"
     d.text((W - 20 - d.textlength(tt, font=font(16, MONO)), 40), tt, fill=FG, font=font(16, MONO))
-    ref = runs.get("single")
+    ref = next(iter(runs.values()))
     top = TITLE_H
     bottom = H - STRIP_H
     for k, (arm, r) in enumerate(runs.items()):
@@ -549,8 +554,10 @@ def main():
         arm, path = x.split("=", 1)
         runs[arm] = (Run.sim(arm, path) if path.endswith(".traj.json")
                      else Run.isaac(arm, path, road, peaks))
+    global COL
+    COL = W // len(runs)                    # two or three panels; the first arm is the reference
     s0 = a.s0 if a.s0 is not None else max(r.s[0] for r in runs.values())
-    s1 = a.s1 if a.s1 is not None else max(r.s[-1] for r in runs.values())
+    s1 = a.s1 if a.s1 is not None else min(r.s[-1] for r in runs.values())   # the stretch all arms drove
     stats = summary_png(runs, os.path.join(a.out, "arms.png"), a.title, a.sub, s0, s1)
     json.dump(stats, open(os.path.join(a.out, "arms_stats.json"), "w"), indent=1)
     print(json.dumps(stats, indent=1))
