@@ -14,6 +14,10 @@ construction, not by penalty):
 - F > 0 drives the rear axle; F < 0 brakes all four, the front pair taking the brake
   distribution's share (static: lr / L), each pair alike; drive and brake are the smooth
   positive and negative parts of one F, so they never act at once;
+- the motor regenerates first, on the rear; on a road too slick for its full regen that falls
+  off past its peak (`held`: ice) within regen_grip_share of the rear's grip, as the ECU's regen slip control
+  holds it once a slip has shown the grip (issue 009), the front's friction brakes taking
+  their share of the rest;
 - the rear pair's split: a locked axle turns both wheels at one speed, so each takes force in
   proportion to its load; an open differential, the same each side;
 - each wheel's lateral force is PhysX's pure-slip force at its slip angle and load (model.tyre
@@ -42,11 +46,15 @@ peak at that angle locks the wheel in a car without ABS: the inner front wheel l
 -0.6 to -0.8) braking into Haruna's hairpin at s 270, the car could not turn and left the road
 (M3, 2026-10-30).
 """
+from dataclasses import replace
+
 import casadi as ca
+import numpy as np
 
 from race_planner import model
 
 G = model.G
+HOLD_SLIDING = 0.75    # the hold's surfaces fall off past their peak this far (window.SLIDING_LOW)
 SMOOTH = 50.0          # N: the width over which drive hands over to brake (smooth max)
 ELLIPSE_EPS = 0.02     # the friction ellipse's rounding at its edge (share of the grip)
 
@@ -113,20 +121,68 @@ def regen_max(car, vx):
     return lim * ca.fmin(ca.fmax((vx - lo) / (hi - lo), 0.0), 1.0)
 
 
-def brakes(car, a, vx):
+def regen_slip_mu(car):
+    """The friction below which the motor's full regen slips the rear (the driven) axle: its
+    regen force at the tyres over the rear axle's load at the deceleration that force alone
+    gives (the ECU's load shift, on the CoM's height). Below it the car's regen slip control
+    (sim_vehicle_ecu, issue 009) finds the axle's grip at the first stop and holds regen within
+    car.regen_grip_share of it from then on; above it regen never slips the rear and is not
+    held. drift_mustang: 2812 N over 6644 N, 0.42 (ice, snow, sand and mud below; grass, gravel,
+    dirt and asphalt above)."""
+    F = car.regen_torque_max / car.r_wheel
+    a = F / car.m
+    rear = car.m * G * car.lf / car.wheel_base - car.m * a * car.h_cg / car.wheel_base
+    return F / rear
+
+
+def held(car, mu, sliding):
+    """Whether the model holds regen (issue 009) on a road of friction `mu` and sliding share
+    `sliding` (numbers or symbols): slick enough for the motor's full regen to slip the rear
+    (regen_slip_mu), and falling off past its peak as ice does (sliding at most HOLD_SLIDING).
+
+    Why only there: on ice the rear's grip is below even mild regen and its force falls past
+    the peak, so a rear-only brake leaves the car at 0.46 mu g and L1 brakes with its front
+    tyres steered to lock (the issue); the car, braking on ice, finds the rear's grip at once.
+    On snow and mud the rear keeps its force past the peak, the plans keep it on its rising
+    branch and brake through the rear alone, the car never slips it and so never holds: with
+    the hold in the model there (and the car told the grip) the plans used the fronts in a
+    braking drift that left every 6 m packed and loose snow road but one (M4g: packed snow 28
+    of 36 against 36, loose snow 24 against 36)."""
+    if isinstance(mu, (int, float)) and isinstance(sliding, (int, float)):
+        return mu < regen_slip_mu(car) and sliding <= HOLD_SLIDING
+    return ca.logic_and(mu < regen_slip_mu(car), sliding <= HOLD_SLIDING)
+
+
+def regen_hold_car(car, mu, sliding):
+    """`car` for planning on a road of friction `mu` and sliding share `sliding` (the nodes',
+    arrays): as it is when a node is `held`, where the car's regen slip control holds its
+    regen; with regen_grip_share None (axle.dynamics without the hold) when none is, so the
+    plans and L2 elsewhere are what they were before issue 009's hold, bit for bit (a switch
+    in the model, even one that picks the old expression exactly, changes its derivatives'
+    rounding)."""
+    mu, sliding = np.asarray(mu, float), np.asarray(sliding, float)
+    if car.regen_grip_share and np.any((mu < regen_slip_mu(car)) & (sliding <= HOLD_SLIDING)):
+        return car
+    return replace(car, regen_grip_share=None)
+
+
+def brakes(car, a, vx, cap=None):
     """What the ECU makes of the request a at forward speed vx (sim_vehicle_ecu's ev
     powertrain): (drive, regen, front, rear), N at the tyres, all >= 0. A positive force drives
-    the rear. A braking force B is regenerative first, within regen_max, on the rear (the
-    driven) axle; the friction brakes are split by brake_share and the regen taken off its axle's
-    share, the excess of it (mild braking: more regen than the rear's share) coming off the
-    front's friction. So `rear` = max(regen, (1 - share) B) with the regen in it, `front` = B -
-    rear. The friction brakes' hydraulic lag (dead time 0.05 s, then 0.04 s first order on
-    drift_mustang) and the motor's (0.02 s) are left out: under a tenth of a second, inside one
-    of L1's intervals (0.13 s at 30 m/s), while a 1 s window turns on the steady split."""
+    the rear. A braking force B is regenerative first, within regen_max and `cap` (the regen slip
+    control's hold, N, or None: none; see `dynamics`), on the rear (the driven) axle; the friction
+    brakes are split by brake_share and the regen taken off its axle's share, the excess of it
+    (mild braking: more regen than the rear's share) coming off the front's friction. So `rear`
+    = max(regen, (1 - share) B) with the regen in it, `front` = B - rear. The friction brakes'
+    hydraulic lag (dead time 0.05 s, then 0.04 s first order on drift_mustang) and the motor's
+    (0.02 s) are left out: under a tenth of a second, inside one of L1's intervals (0.13 s at
+    30 m/s), while a 1 s window turns on the steady split."""
     F = feedforward(car, a, vx)
     drive, B = _pos(F), _pos(-F)
     share = brake_share(car, -a)
     regen = _smin(B, regen_max(car, vx))
+    if cap is not None:
+        regen = _smin(regen, cap)
     rear = _smax(regen, (1.0 - share) * B)
     return drive, regen, B - rear, rear
 
@@ -147,11 +203,22 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, w_rear=None, w_front=None, surface
     mus = mu if isinstance(mu, (list, tuple)) else [mu] * 4
     sls = sliding if isinstance(sliding, (list, tuple)) else [sliding] * 4
     speed = ca.sqrt(vx * vx + vy * vy + 1e-6)
-    drive, regen, front_brake, rear_brake = brakes(car, a, vx)
-    brake = front_brake + rear_brake
-    share = brake_share(car, -a)
     fz = model.loads(car, acc[0], acc[1])
     fz0 = model.rest_loads(car)
+    drive, regen, front_brake, rear_brake = brakes(car, a, vx)
+    if car.regen_grip_share and car.regen_torque_max > 0 and car.drive_axle == "rear":
+        # the regen slip control (issue 009): where the road is too slick for the motor's full
+        # regen, the car has found the rear's grip and holds regen within regen_grip_share of
+        # it (smooth: a kink here stalled L2's QPs every other tick, M4g); a switch on the
+        # road's friction and sliding share (`held`), parameters
+        mu_rear, sl_rear = 0.5 * (mus[2] + mus[3]), 0.5 * (sls[2] + sls[3])
+        hold = brakes(car, a, vx, car.regen_grip_share * mu_rear * (fz[2] + fz[3]))
+        slick = held(car, mu_rear, sl_rear)
+        drive, regen, front_brake, rear_brake = (ca.if_else(slick, h, f) for h, f in
+                                                 zip(hold, (drive, regen, front_brake,
+                                                            rear_brake)))
+    brake = front_brake + rear_brake
+    share = brake_share(car, -a)
     # what of the ECU's wheel torques the wheels keep: the driveline's drag (the feedforward
     # adds it, PhysX's wheel damping takes it) and their own inertia at the body's acceleration
     loss = car.wheel_damping * vx / car.r_wheel ** 2 + 0.5 * car.wheel_mass * acc[0]

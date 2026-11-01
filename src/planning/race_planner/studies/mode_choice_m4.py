@@ -59,7 +59,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.environ.get("RP_ROOT") or os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from race_planner import live, modes  # noqa: E402
+from race_planner import axle, live, modes  # noqa: E402
 from race_planner.car import Car  # noqa: E402
 from race_planner.live import Driver  # noqa: E402
 from race_planner.multistart import held_bound  # noqa: E402
@@ -207,7 +207,16 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
                            **({"rules": rules} if rules else {})},
               "perception": Perception(smap, seed=1000 * rep + seed) if perc and smap else None}
     plant = Plant(car, e1.SPEC, world)
+    # a car on ice has braked on it before the corner: its ECU has found the rear's grip and
+    # holds regen within its share of it (issue 009), as the planner's model assumes there
+    # (axle.regen_hold_car, axle.held); found here by braking on the course's start, then the
+    # run starts afresh with only that kept
+    primed = None
+    if axle.regen_hold_car(car, world.mu, world.sliding).regen_grip_share:
+        primed = plant.regen_grip_found(s=s0, speed=v0)
     plant.reset(s=s0, speed=v0)
+    if primed is not None:
+        plant.ecu.powertrain.axle_mu = primed
     d = Driver(car, planner, Tracker(car, planner, grip=GRIP), ds=DS, grip=GRIP, multistart=ms,
                use_estimate=est, estimator=FrictionEstimate() if est else None,
                beta_max=None if beta_max is None else math.radians(beta_max),
@@ -284,6 +293,10 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
            "itercap": os.environ.get("RP_ITERCAP"), "jit": jit,
            **obs.result(d),
+           # the car (issue 009): the plant's ECU, its regen slip control, the planner's hold
+           "ecu": os.path.dirname(os.path.dirname(os.path.abspath(plant.ecu_mod.__file__))),
+           "ecu_regen_slip": getattr(plant.ecu.c, "regen_slip_control", None),
+           "regen_hold": d.car.regen_grip_share, "ecu_primed": primed,
            **({} if dig is None else dig.result())}
     os.makedirs(OUT, exist_ok=True)
     key = run_key(name, arm, err, seed, perc, est, rep, tag)

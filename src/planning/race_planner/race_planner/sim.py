@@ -23,7 +23,8 @@ Isaac judges them (the live planner's design, section 6).
   `mu_ratio`: the estimate over the tyre's design friction, as Isaac's car reports it.
 
 sim_vehicle_ecu is found beside this repository's checkout of the superproject
-(SWB/src/sim_vehicle_ecu, SWB from the environment, default ~/repos/carla-scenario-bridge).
+(SWB/src/sim_vehicle_ecu, SWB from the environment, default ~/repos/carla-scenario-bridge), or
+at SIM_VEHICLE_ECU (a checkout of its own, e.g. a worktree of another commit).
 """
 from dataclasses import replace
 import math
@@ -42,7 +43,7 @@ ECU_RATE, SUBSTEPS = 60.0, 8
 
 
 def _ecu_module():
-    path = os.path.join(SWB, "src", "sim_vehicle_ecu")
+    path = os.environ.get("SIM_VEHICLE_ECU") or os.path.join(SWB, "src", "sim_vehicle_ecu")
     if path not in sys.path:
         sys.path.insert(0, path)
     import sim_vehicle_ecu
@@ -91,6 +92,19 @@ class Plant:
         self.acc = np.zeros(2)
         self.ecu.reset() if hasattr(self.ecu, "reset") else None
         return self.state()
+
+    def regen_grip_found(self, s=None, speed=10.0, accel=-1.8, seconds=0.6):
+        """What the car's ECU finds braking straight at `accel` for `seconds` from node s at
+        `speed`: the driven axle's friction its regen slip control holds regen within (issue
+        009; None when regen never slipped the rear, or for an ECU without the control). A car
+        that has braked on the road before a corner knows it; put it in the ECU after a reset
+        (`ecu.powertrain.axle_mu`) to start the corner so. The plant is left mid-probe: reset
+        it after."""
+        self.reset(s=s, speed=speed)
+        t_end = self.t + seconds
+        while self.t < t_end - 1e-9:
+            self.step(accel, 0.0, velocity=0.0)
+        return getattr(self.ecu.powertrain, "axle_mu", None)
 
     def patch(self, s):
         """The friction's scale at s from the patches (1 off them)."""

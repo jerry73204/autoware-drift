@@ -79,6 +79,7 @@ TERMINAL = 10.0                 # the last node's weight: where the car is in a 
 EDGE_QUAD, EDGE_LIN = 1e4, 1e3  # the edge slack's cost per m^2, per m: far above tracking
 USE_QUAD, USE_LIN = 1e3, 1e2    # the grip slack's (in shares of the grip)
 W_PROX = 1.0                    # m/s: the wheels' speeds' step that costs as much as one unit
+W_PROX_FRONT_HELD = 0.3         # m/s: the front wheels', where the car's regen is held (009)
 # the slack of the actuators' rows (drive, power, the brakes; in their limits) and the tyres'
 # slip bounds: those are soft, the tyres' force balances hard. Soft balances let the solver set
 # the tyres where tracking wanted them and the request anywhere (it drove +5 m/s^2 into the R20
@@ -208,6 +209,7 @@ class LqrTracker:
     the car's limits. Valid near the plan (Peterson), which is where it is used."""
 
     def __init__(self, car, track, horizon=1.0, dt=0.04, grip=1.0, tick=0.02):
+        car = axle.regen_hold_car(car, grip * np.asarray(track.mu), track.sliding)   # 009
         self.car, self.track, self.dt, self.tick = car, track, dt, tick
         self.N = int(round(horizon / dt))
         self.rate = car.steer_rate_max or STEER_RATE
@@ -288,6 +290,7 @@ class Tracker:
 
     def __init__(self, car, track, horizon=1.0, dt=0.04, tick=0.02, grip=1.0, budget=BUDGET,
                  qpsol="hpipm"):
+        car = axle.regen_hold_car(car, grip * np.asarray(track.mu), track.sliding)   # 009
         self.car, self.track, self.dt, self.tick, self.budget = car, track, dt, tick, budget
         self.N = N = int(round(horizon / dt))
         self.rate = car.steer_rate_max or STEER_RATE
@@ -361,8 +364,15 @@ class Tracker:
         # them, so without it one QP in twenty was too ill-posed for HPIPM
         damp = np.full(nw, 1e-6)
         st = NX + nu + NS
+        # (the front wheels' the tighter on a road where the car's regen is held, issue 009:
+        # their brakes then carry a share of mild braking, on ice at a front already past its
+        # 3 deg lateral peak in a turn, where its force barely moves with its speed; with
+        # W_PROX the front left's predicted speed swung 5-10 m/s tick to tick and HPIPM failed
+        # every other tick, the LQR's drive in between: 15 m ice roads lost)
+        w_front = W_PROX_FRONT_HELD if car.regen_grip_share else W_PROX
         for k in range(N):
             damp[k * st + NX + NU:k * st + NX + nu] = 1.0 / W_PROX ** 2
+            damp[k * st + NX + NU + 1:k * st + NX + nu] = 1.0 / w_front ** 2
         H = ca.mtimes(J.T, J) + ca.diag(ca.DM(damp))
         grad = ca.mtimes(J.T, R) + ca.gradient(lin, w)
         self.qp = ca.Function("rti_qp", [w, par], [H, grad, C, Jc])

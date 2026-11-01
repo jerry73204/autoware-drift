@@ -15,6 +15,9 @@ Only what the spec says goes in; nothing is per track. Derived quantities:
 - regen_torque_max (at the axle) and regen_power_max: what the motor regenerates under braking
   (sim_vehicle_ecu: first, before the friction brakes), faded out between regen_fade's speeds;
   0 for `ideal`.
+- regen_grip_share: the ECU's regen slip control's hold, regen within this share of the rear's
+  grip once a slip has shown it (sim_vehicle_ecu's calibration default, or the spec's
+  `powertrain.regen_slip_control.grip_share`; None or 0: none, the ECU's control off).
 - wheel_mass, wheel_damping: what the ECU's feedforward adds for the wheels (their inertia
   reflected, the driveline's drag).
 - steer_rate_max: the steering actuator's rate limit, rad/s at the bicycle angle (the spec's
@@ -32,6 +35,9 @@ from dataclasses import dataclass
 import math
 
 import yaml
+
+# sim_vehicle_ecu's regen_grip_share (its calibration's default; issue 009)
+REGEN_GRIP_SHARE = 0.7
 
 
 @dataclass
@@ -69,6 +75,7 @@ class Car:
     regen_fade: tuple = (1.0, 3.0)  # m/s: no regen at or below the first, full from the second
     est_mu_recover_rate: float = 0.1  # 1/s: the ECU's friction estimate's recovery away from the
     # limit (sim_vehicle_ecu's estimator; a calibration default, the spec does not set it)
+    regen_grip_share: float = REGEN_GRIP_SHARE   # the ECU's regen slip control's hold (009)
 
     def __post_init__(self):
         if self.transfer_height is None:
@@ -96,6 +103,9 @@ class Car:
             regen_t = float(p.get("regen_max_torque", 0.0)) * p["gear_ratio"]
             regen_p = float(p.get("regen_max_power", 0.0))
         rate = float(d.get("steering", {}).get("rate_limit", 0.0))
+        rsc = p.get("regen_slip_control") or {}
+        grip_share = (float(rsc.get("grip_share", REGEN_GRIP_SHARE))
+                      if rsc.get("enabled", True) else None)
         r = d["resistance"]
         return cls(
             name=d["name"], m=float(i["mass"]), Iz=float(i["mass"]) * (l * l + w * w) / 12.0,
@@ -115,4 +125,5 @@ class Car:
             steer_rate_max=rate if rate > 0 else None,
             wheel_mass=float(d.get("wheels", {}).get("mass", 20.0)),
             wheel_damping=float(d.get("wheels", {}).get("damping_rate", 0.25)),
-            regen_fade=tuple(float(v) for v in p.get("regen_fade_speeds", (1.0, 3.0))))
+            regen_fade=tuple(float(v) for v in p.get("regen_fade_speeds", (1.0, 3.0))),
+            regen_grip_share=grip_share)

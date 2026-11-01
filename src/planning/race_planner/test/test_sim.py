@@ -54,3 +54,21 @@ def test_a_wrong_plant_grips_less():
             st = p.step(0.0, math.radians(8.0), dt=0.02)
         out.append(abs(st["ay"]))
     assert out[0] < out[1]
+
+
+def test_on_a_slick_road_the_car_finds_its_rear_grip_and_brakes_on_both_axles():
+    # issue 009: the ECU's regen slip control, on a road a quarter as grippy as the design's
+    lo = plant(mu_scale=0.25)
+    if not hasattr(lo.ecu.c, "regen_slip_control"):
+        pytest.skip("this sim_vehicle_ecu has no regen slip control (SIM_VEHICLE_ECU)")
+    mu = 0.25 * float(lo.track.mu[0])
+    found = lo.regen_grip_found(speed=13.0)
+    assert found == pytest.approx(mu, rel=0.25)
+    lo.reset(speed=13.0)
+    lo.ecu.powertrain.axle_mu = found
+    for _ in range(50):
+        st = lo.step(-1.8, 0.0, velocity=0.0, dt=0.02)
+    R = lo.car.r_wheel
+    assert st["w"][2] * R == pytest.approx(st["vx"], abs=0.5)    # the rear rolls, not locked
+    assert lo.last_act.brake[0] > 50.0                            # the front's brakes work
+    assert plant().regen_grip_found(speed=13.0) is None           # full grip: never slips

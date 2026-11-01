@@ -18,6 +18,7 @@ import math
 
 import numpy as np
 
+from race_planner import axle
 from race_planner.line import min_curvature_line
 from race_planner.qss import speed_profile
 from race_planner.window import (FLAT, FREE_STAGES, G, MU_LOW, SLIDING_LOW, Window,
@@ -187,6 +188,9 @@ class Driver:
             self.track = self.track.extended(2 * self.length + 4 * self.ds)
         if not np.any(np.asarray(self.track.sliding) >= FLAT):
             self.front_slip_max = self.rear_slip_max = None
+        # the ECU's regen hold in the model only where a road is slick enough for it (issue 009)
+        self.car = axle.regen_hold_car(self.car, self.grip * np.asarray(self.track.mu),
+                                       self.track.sliding)
         if not np.any((np.asarray(self.track.sliding) <= SLIDING_LOW)
                       & (np.asarray(self.track.mu) <= MU_LOW)):
             self.rear_slip_low = None
