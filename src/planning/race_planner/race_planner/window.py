@@ -241,6 +241,57 @@ def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
 
 
 KAPPA_ROWS = [ROWS.index(n) for n in ("kappa_rl", "kappa_rr", "kappa_fl", "kappa_fr")]
+REAR_USE_ROWS = [ROWS.index(n) for n in ("use_rl", "use_rr")]
+RECOVER = 1.1         # issue 013: the rear's brake within this share of its sliding force
+PROBE = 50.0          # m: on a held road's first metres after another road (the map's)
+RECOVER_EPS = 0.02    # the smooth negative part's rounding (in the rows' units)
+
+
+def recover_gains(car, mu, sliding, s, recover=None, probe=None):
+    """Per node, the gain the rear tyres' braking rows take in `recoverable_rear_rows`: 1 /
+    (recover x sliding share) - 1 on a held node (axle.held, at the planned friction `mu`)
+    within `probe` (PROBE) m after the last node that is not, 0 elsewhere (no bound). A course
+    that starts on a held road has none there: its car has braked on it before (the studies
+    prime its ECU, sim.Plant.regen_grip_found)."""
+    k = RECOVER if recover is None else recover
+    d = PROBE if probe is None else probe
+    mu, sliding, s = (np.asarray(v, float) for v in (mu, sliding, s))
+    held = (mu < axle.regen_slip_mu(car)) & (sliding <= axle.HOLD_SLIDING)
+    out = np.zeros(len(s))
+    last = -np.inf
+    for i in range(len(s)):
+        if not held[i]:
+            last = s[i]
+        elif s[i] - last <= d:
+            out[i] = 1.0 / (k * sliding[i]) - 1.0
+    return out
+
+
+def recoverable_rear_rows(g):
+    """g(x, u, p) -> g(x, u, p'), p' = (p, gain): the rear tyres' braking rows times (1 + gain)
+    (their drive as before), so where gain = 1 / (k sl) - 1 (recover_gains) the rear brakes
+    within k times its sliding force, sl mu Fz; gain 0, the rows as they were.
+
+    Why (issue 013): the car finds a road's rear grip by slipping its rear (the regen slip
+    control's first event there) and until then brakes with the last road's: onto ice from
+    asphalt the motor's regen put 2100 N on a rear that carries 1730 at its peak. The control
+    then cuts regen to the rear's own share of the brakes, which on this car is all regen (no
+    ABS: the friction brakes would only take it over). A plan braking at ice's 0.9 mu g asks
+    1500 N of that share, within the peak but past the 1210 N the tyre carries sliding: a rear
+    past its peak cannot come back and stays locked (slip -0.3 to -1) until L2 lifts off, and
+    the car yaws. Within the sliding force (a straight on ice from 20 m/s, the ECU's grip
+    stale) the slip comes back in 0.3 s, at 1.06 of it 0.4 s, at 1.12 it stays locked. Once
+    the car has found the grip it holds regen within it and a rear on its rising branch
+    stays there (the corner suite: its ECU primed, -2.4 m/s^2 rolls), so only the first
+    metres."""
+    x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", NU), ca.SX.sym("p", NP + 1)
+    rows = g(x, u, p[:NP])
+    out = [rows[i] for i in range(rows.shape[0])]
+    for i in REAR_USE_ROWS:
+        use = out[i]
+        neg = 0.5 * (use - ca.sqrt(use * use + RECOVER_EPS ** 2))   # smooth min(use, 0)
+        out[i] = use + p[NP] * neg
+    return ca.Function("g", [x, u, p], [ca.vertcat(*out)])
 
 
 KAPPA_SHARE_LOW = 0.5   # a surface peaking at under this share of the rig's slip: issue 008
@@ -376,25 +427,32 @@ class Window:
             self.g = slip_rows(car, self.g, front_slip_max, rear_slip_max, rear_slip_low,
                                grip * MU_LOW)
             lbg, ubg = list(lbg) + [-1.0] * nk, list(ubg) + [1.0] * nk
+        # a hold car (axle.regen_hold_car) brakes its rear within what it carries sliding on a
+        # held road's first metres (issue 013): one parameter more a stage, the gain
+        self.recover = bool(car.regen_grip_share and car.regen_torque_max > 0
+                            and car.drive_axle == "rear")
+        if self.recover:
+            self.g = recoverable_rear_rows(self.g)
+        npw = self.npw = NP + self.recover
         self.lbg, self.ubg = np.array(lbg, float), np.array(ubg, float)
         ng = len(lbg)
         # one stage in the scaled variables
-        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", NU), ca.SX.sym("p", NP)
+        xs, us, p = ca.SX.sym("xs", 6), ca.SX.sym("us", NU), ca.SX.sym("p", npw)
         x, u = xs * X_SCALE, us * U_SCALE
-        xn, dt = rk4(self.f, x, u, p, ds)
+        xn, dt = rk4(self.f, x, u, p[:NP], ds)
         stage = ca.Function("l1_stage", [xs, us, p], [xn / X_SCALE, dt, self.g(x, u, p)])
         # the decision vector stage by stage (x_k, u_k), then x_N
         # (x_k, u_k, e_k: how far node k is past the road's edge less the margin)
         W = ca.MX.sym("w", NZ * M + 6)
-        Pw = ca.MX.sym("p", NP + 2, M)           # the stage's (NP), the free width l, r
-        Pp = Pw[:NP, :]
+        Pw = ca.MX.sym("p", npw + 2, M)          # the stage's (npw), the free width l, r
+        Pp = Pw[:npw, :]
         Z = ca.reshape(W[:NZ * M], NZ, M)
         Xk, Uk, Ek, xN = Z[:6, :], Z[6:6 + NU, :], Z[6 + NU, :], W[NZ * M:]
         xn_s, dts, G = stage.map(M)(Xk, Uk, Pp)
         n = Xk[3, :] * X_SCALE[3]
         sx = X_SCALE
         rows = ca.vertcat(xn_s - ca.horzcat(Xk[:, 1:], xN), G,     # each stage's, together
-                          n + Ek + Pw[NP + 1, :], n - Ek - Pw[NP, :])
+                          n + Ek + Pw[npw + 1, :], n - Ek - Pw[npw, :])
         for c, tb in held:                       # vy - c r - tb vx <= 0 <= vy - c r + tb vx
             v = sx[1] * Xk[1, :] - c * sx[2] * Xk[2, :]
             rows = ca.vertcat(rows, v - tb * sx[0] * Xk[0, :], v + tb * sx[0] * Xk[0, :])
@@ -434,7 +492,7 @@ class Window:
         # the Lagrangian's Hessian by stages: CasADi's own, by colouring the whole map, took
         # 1.8 ms an iteration; each stage's own block is one pass of one stage
         lam_f, lam_g = ca.MX.sym("lam_f"), ca.MX.sym("lam_g", per * M + 2)
-        zs, ps, lf, lm = ca.SX.sym("z", NZ), ca.SX.sym("p", NP), ca.SX.sym("lf"), ca.SX.sym("l", 6 + ng)
+        zs, ps, lf, lm = ca.SX.sym("z", NZ), ca.SX.sym("p", npw), ca.SX.sym("lf"), ca.SX.sym("l", 6 + ng)
         o = stage(zs[:6], zs[6:6 + NU], ps)
         Hk, _ = ca.hessian(lf * o[1] + ca.dot(lm[:6], o[0]) + ca.dot(lm[6:], o[2]), zs)
         hs = ca.Function("l1_stage_hess", [zs, ps, lf, lm], [Hk])
@@ -522,6 +580,13 @@ class Window:
         mu = track.mu[sl] * (1.0 if mu_scale is None else np.asarray(mu_scale)[:len(track.mu[sl])])
         P = np.vstack([track.kappa[sl], self.grip * mu, track.grade[sl], track.sliding[sl],
                        *(getattr(track, k)[sl] for k in TYRE_FIELDS)])[:, :self.M]
+        if self.recover:                         # issue 013: the gains, from the whole course
+            key = (id(track), len(track.s))
+            if getattr(self, "_gains_key", None) != key:
+                self._gains = recover_gains(self.car, self.grip * track.mu, track.sliding,
+                                            track.s)
+                self._gains_key = key
+            P = np.vstack([P, self._gains[sl][:self.M]])
         return P, track.w_left[sl], track.w_right[sl], track.s[sl]
 
     def solve(self, track, i0, x0, v_end, X_init, U_init, mu_scale=None):
@@ -572,7 +637,7 @@ class Window:
     def _result(self, P, s, Xv, Uv, ok, status, iters, dt, i0):
         seg, gap, over = [], 0.0, 0.0
         for k in range(self.M):
-            xn, tk = rk4(self.f, Xv[:, k], Uv[:, k], P[:, k], self.ds)
+            xn, tk = rk4(self.f, Xv[:, k], Uv[:, k], P[:NP, k], self.ds)
             seg.append(float(tk))
             gap = max(gap, float(np.max(np.abs(np.asarray(xn).ravel() - Xv[:, k + 1]))))
             gv = np.asarray(self.g(Xv[:, k], Uv[:, k], P[:, k])).ravel()

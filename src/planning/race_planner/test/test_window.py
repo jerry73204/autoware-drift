@@ -231,3 +231,41 @@ def test_the_slip_ratio_rows_are_in_the_surfaces_own_peak_where_it_peaks_earlier
         assert np.allclose(b[KAPPA_ROWS], a[KAPPA_ROWS] * scale, rtol=1e-12)
         if scale == 1.0:
             assert np.array_equal(a, b)
+
+
+def test_a_held_roads_first_metres_brake_the_rear_within_what_it_carries_sliding():
+    """Issue 013: onto ice from another road the car's ECU brakes with that road's grip until a
+    slip shows it ice's, and a rear past its peak comes back only if its brake is within what
+    the tyre carries sliding. The rear's braking rows take the gain there (PROBE m after the
+    other road; not where a course starts on ice, not on the other roads, not past PROBE); its
+    drive, and every row with gain 0, as before, bit for bit."""
+    from race_planner.window import (NP, PROBE, RECOVER, REAR_USE_ROWS, node_functions,
+                                     recover_gains, recoverable_rear_rows)
+    c = car()
+    s = np.arange(0.0, 300.0, 4.0)
+    ice = ((s < 40) | ((s >= 100) & (s < 200))).astype(bool)
+    mu = np.where(ice, 0.92 * 0.265, 0.92 * 1.12)
+    sl = np.where(ice, 0.7, 1.0)
+    k = recover_gains(c, mu, sl, s)
+    first = ice & (s >= 100) & (s - 96 <= PROBE)
+    assert np.allclose(k[first], 1.0 / (RECOVER * 0.7) - 1.0)
+    assert np.all(k[~first] == 0.0)            # the start on ice, the asphalt, past PROBE
+    _, g, _, _, _ = node_functions(c, tyres=True)
+    gr = recoverable_rear_rows(g)
+    x = [15.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    p = [0.0, 0.244, 0.0, 0.7, 1.0, 1.0, 0.196, 1.0]
+    for a, w in ((-2.0, 13.5), (1.0, 15.6)):    # braking (the rear slower), driving
+        u = [0.0, a, a, 0.0, w, 15.0, 15.0]
+        base = np.asarray(g(x, u, p)).ravel()
+        assert np.array_equal(np.asarray(gr(x, u, p + [0.0])).ravel(), base)
+        gain = 1.0 / (RECOVER * 0.7) - 1.0
+        b = np.asarray(gr(x, u, p + [gain])).ravel()
+        other = [i for i in range(len(base)) if i not in REAR_USE_ROWS]
+        assert np.array_equal(b[other], base[other])
+        if a < 0:
+            assert np.all(base[REAR_USE_ROWS] < -0.05)
+            assert np.allclose(b[REAR_USE_ROWS], base[REAR_USE_ROWS] * (1 + gain), rtol=1e-3)
+        else:
+            assert np.all(base[REAR_USE_ROWS] > 0.05)
+            assert np.allclose(b[REAR_USE_ROWS], base[REAR_USE_ROWS], atol=1e-3)
+    assert NP + 1 == gr.size1_in(2)
