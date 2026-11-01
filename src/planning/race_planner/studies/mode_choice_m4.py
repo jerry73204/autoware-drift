@@ -15,8 +15,8 @@ Arms (`--arm`):
   car's estimate used, held low through a slide: surface.FrictionEstimate).
 
 Courses:
-- `c:<class>:<R>:<turn deg>:<width m>`: one corner of the drift study's geometry (60 m entry
-  straight, 8 m ramps, the exit straight), the whole road one swb class;
+- `c:<class>:<R>:<turn deg>:<width m>[:<entry m>]`: one corner of the drift study's geometry (60 m
+  entry straight, or <entry>; 8 m ramps, the exit straight), the whole road one swb class;
 - `zones`: M3b's class-zone chain (E1's ten corners, each in a zone of a class, one uncertain);
 - `haruna`, `tsukuba`: swb's courses, dry, one lap;
 - `<course>@<class>`: haruna, tsukuba or zones (E1's ten-corner chain) with the whole road one
@@ -29,7 +29,7 @@ Its drift gain (held - best) is the ceiling a loop can keep.
 
 Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> --arm sched
           [--err 10 --seed 1 --perc --est --rep 1 --cpus 8,9,10,11]
-          [--style <style.yaml or JSON>] [--digest] [--jit 1e-9] [--traj]
+          [--style <style.yaml or JSON>] [--digest] [--jit 1e-9] [--traj] [--prices <json>]
       --traj: the run tick by tick as well, <key>.traj.json (the car, each wheel's slip against
       its peak, every adopted plan with its seed and mode, the road), for tools/arm_video.py;
       --style: the driving style record (roadmap 065; live.Driver's style), none by default;
@@ -164,9 +164,14 @@ def course(name, car, err=0, seed=0):
                 zones.append(Zone(c.s_in - m3b.APPROACH, c.s_out + 20.0, cls))
         zones, pick = misdeclare(zones, err, seed)
         return base, SurfaceMap(tab, car, zones), 10.0, 12.0, None, {"wrong": pick}
-    _, cls, R, turn, width = name.split(":")
+    _, cls, R, turn, width, *entry = name.split(":")
     R, turn, width = float(R), math.radians(float(turn)), float(width)
-    base, s_in, s_out = do.section(R, turn, 1.12, 0.8, ds=1.0, half_width=width / 2)
+    # an entry straight longer than the study's 60 m (roadmap 065 M3): the gate's re-plans need
+    # room before the turn-in (two in a row with the drift's onset AHEAD into the window)
+    l_in = float(entry[0]) if entry else do.L_IN
+    length = max(do.LENGTH, l_in + turn * R + 2 * do.RAMP + do.EXIT_TIMED + 60.0)
+    base, s_in, s_out = do.section(R, turn, 1.12, 0.8, ds=1.0, half_width=width / 2,
+                                   l_in=l_in, length=length)
     zones, pick = misdeclare([Zone(0.0, 1e5, cls)], err, seed)
     smap = SurfaceMap(tab, car, zones)
     v0 = do.v_start(R, tab.mu(cls, car) * GRIP)
@@ -189,7 +194,7 @@ def _load():
 
 def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=None, rules=None,
         sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None, style=None,
-        digest=False, jit=0.0, traj=False):
+        digest=False, jit=0.0, traj=False, prices=None):
     car = Car.from_spec(e1.SPEC)
     if sd is not None:
         import race_planner.surface as sf
@@ -205,7 +210,8 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
         ms = {"threshold": 0.003, "seed_budget": e1.SEED_BUDGET, "cpus": cpus,
               "schedule": {"table": table(), "smap": smap, "always": arm == "always",
                            **({"rules": rules} if rules else {})},
-              "perception": Perception(smap, seed=1000 * rep + seed) if perc and smap else None}
+              "perception": Perception(smap, seed=1000 * rep + seed) if perc and smap else None,
+              **({"course_prices": prices} if prices else {})}
     plant = Plant(car, e1.SPEC, world)
     # a car on ice has braked on it before the corner: its ECU has found the rear's grip and
     # holds regen within its share of it (issue 009), as the planner's model assumes there
@@ -280,6 +286,12 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "solve_max": float(max([x["solve_s"] for x in solves])) if solves else None,
            "per_replan": (float(np.mean([len(x["slots"]) for x in recs])) if recs else 1.0),
            "g_only": (sum(1 for x in recs if x["slots"] == ["G"]) / len(recs)) if recs else 1.0,
+           # a re-plan's IPOPT iterations, its slowest start's (the starts run at once): with no
+           # clock (RP_DET) the load-free stand-in for L1's time (roadmap 065 M3, R6)
+           "iters_p95": (float(np.percentile([max(v["iters"] for v in x["seeds"].values())
+                                              for x in recs], 95)) if recs else None),
+           "iters_max": (int(max(max(v["iters"] for v in x["seeds"].values()) for x in recs))
+                         if recs else None),
            "fallback_ticks": fb, "ticks": len(log),
            "lat_max": float(lat.max()), "lat_rms": float(np.sqrt(np.mean(lat ** 2))),
            "beta_max": float(beta.max()), "beta_plan_max": float(bplan.max()),
@@ -291,7 +303,7 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "estimate_min": float(min([r["mu_scale"] for r in log] or [1.0])),
            "style": None if style is None else getattr(d, "style", None).to_dict(),
            "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
-           "itercap": os.environ.get("RP_ITERCAP"), "jit": jit,
+           "itercap": os.environ.get("RP_ITERCAP"), "jit": jit, "prices": prices,
            **obs.result(d),
            # the car (issue 009): the plant's ECU, its regen slip control, the planner's hold
            "ecu": os.path.dirname(os.path.dirname(os.path.abspath(plant.ecu_mod.__file__))),
@@ -328,13 +340,14 @@ class _DriftObs:
             return st
         plant.step = step_
 
-    def _peak(self, i):
-        if i not in self._pk:
+    def _peak(self, i, grip=1.0):
+        if (i, grip) not in self._pk:
             from race_planner.track import TYRE_FIELDS
             w = self.world
-            self._pk[i] = modes.rear_peak(self.car, float(w.mu[i]), float(w.sliding[i]),
-                                          tuple(float(getattr(w, k)[i]) for k in TYRE_FIELDS))
-        return self._pk[i]
+            self._pk[i, grip] = modes.rear_peak(
+                self.car, grip * float(w.mu[i]), float(w.sliding[i]),
+                tuple(float(getattr(w, k)[i]) for k in TYRE_FIELDS))
+        return self._pk[i, grip]
 
     def result(self, d):
         if len(self.rows) < 2:
@@ -345,9 +358,14 @@ class _DriftObs:
             [self._peak(int(k)) for k in i])
         ds = np.diff(s, prepend=s[0]).clip(min=0.0)
         on = past >= self.past
+        # and against the planner's peak (grip times the true friction), the one its plans are
+        # called a drift by (multistart.classify; roadmap 065 M3): 1.25 deg earlier on asphalt
+        rear = np.abs(np.arctan2(vy - self.car.lr * r, np.maximum(vx, 0.1)))
+        on_g = rear - np.array([self._peak(int(k), GRIP) for k in i]) >= self.past
         out = {"plant_drift_m": round(float(ds[on].sum()), 1),
                "plant_drift_share": round(float(ds[on].sum() / max(ds.sum(), 1e-9)), 4),
-               "plant_past_max_deg": round(float(np.degrees(past.max())), 2)}
+               "plant_past_max_deg": round(float(np.degrees(past.max())), 2),
+               "plant_drift_m_planner": round(float(ds[on_g].sum()), 1)}
         if d.multi is not None:
             per = {}
             for c in d.multi.corners:
@@ -355,6 +373,9 @@ class _DriftObs:
                 if z.any():
                     per[round(c.s_in, 1)] = round(float(ds[z & on].sum()), 1)
             out["plant_drift_corners"] = per
+            out["plant_drift_corners_planner"] = {
+                round(c.s_in, 1): round(float(ds[(s >= c.s_in - 30.0) & (s <= c.s_out) & on_g]
+                                              .sum()), 1) for c in d.multi.corners}
             lap = getattr(d.multi, "s2", None)
             if lap is not None:
                 out["s2"] = dict(lap.summary(), spent=round(lap.account.spent, 4),
@@ -1017,6 +1038,49 @@ EPS_PCT = (0.3, 1.0, 2.0, 3.0)
 S1_LAP = {"haruna": 76.28, "tsukuba": 74.33}     # S1's det laps on 95b902e (065 E1)
 
 
+def course_prices(name, out=None):
+    """Each corner of a course priced as the live gate sees it (roadmap 065 M3): a live.Driver on
+    the planner's track, the car on the course's grip plan (drift_optimality.grip_plan) from the
+    run's start, and from LIVE_D metres before each turn-in the live windows' G, D (Ds, Dc), B
+    (the floor) and H, as drift_optimality.live_positions does for a cell. Writes
+    <out>/prices_<course>.json: per corner its map price (drift_losses.json, as S2 prices it)
+    and the live losses per position, the largest, the drift's start."""
+    from race_planner.budget import LossMap, S2Lap
+    from race_planner.multistart import s2_classes
+    from race_planner.schedule import Scheduler
+    from race_planner.style import Style
+    out = out or os.path.join(SWB, "play_log/race_planner/style/m3")
+    car = Car.from_spec(e1.SPEC)
+    planner, world, smap, s0, v0, span, info = tracks(name, car)
+    sch = Scheduler(planner, car, table(), smap=smap, grip=GRIP)
+    classes, flat = s2_classes(sch, planner)
+    cs = sch.corners
+    base = S2Lap.build(Style(name="drift_budget"), cs, classes, LossMap.load(), flat)
+    d = do.live_driver(car, planner)
+    i_s = int(np.searchsorted(d.track.s, s0))
+    gp = do.grip_plan(d, i_s, v0)
+    print(name, "grip plan", d.length, "m windows, caps", d.rear_slip_max, flush=True)
+    rows = []
+    for c in cs:
+        pos, deg = do.live_positions(d, c, gp, i_s)
+        priced = [p for p in pos if "loss_s" in p]
+        mp = base.priced[c.s_in]
+        r = {"s_in": round(c.s_in, 1), "R": round(c.R, 1), "turn": round(math.degrees(c.turn)),
+             "map": None if mp is None else round(mp.loss_s, 4), "floor_deg": deg,
+             "live": [None if "loss_s" not in p else round(p["loss_s"], 4) for p in pos],
+             "live_from": [p["drift_from"] for p in pos],
+             "live_max": max((p["loss_s"] for p in priced), default=None),
+             "positions": pos}
+        rows.append(r)
+        print(name, r["s_in"], "R", r["R"], "turn", r["turn"], "map", r["map"], "live", r["live"],
+              r["live_from"], flush=True)
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, f"prices_{name.replace(':', '_')}.json"), "w") as fh:
+        json.dump({"course": name, "window_m": d.length, "corners": rows}, fh,
+                  default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    return rows
+
+
 def pareto(names):
     """For each course: its corners priced from race_planner/drift_losses.json as S2 prices them
     (multistart.s2_classes, budget.S2Lap), and for each budget (BUDGETS_S seconds, and EPS_PCT %
@@ -1131,6 +1195,86 @@ def s2_report(d=None):
     print(text)
 
 
+M3_OUT = os.path.join(SWB, "play_log/race_planner/style/m3")
+
+
+def m3_report(d=None):
+    """E3 at M3 (roadmap 065): the runs under d (default M3_OUT/e3), tagged <style>_j<k> (k the
+    --jit draw: 0, 1e-9, 2e-9, ...), grouped by course and style over the draws: each draw's
+    result and time; the mean and spread (max - min) of the loss against S1's draw of the same
+    jit; whether every draw is within the budget + 0.3 % of S1; the plant's drift (metres 3 deg
+    past the true peak, and past the planner's), the corners bought, entered (debited) and the
+    account spent; mode changes per corner (the most). M3_OUT/e3.md and e3.json."""
+    d = d or os.path.join(M3_OUT, "e3")
+    rs = [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d))
+          if f.endswith(".json") and not f.endswith(".traj.json")]
+    t = lambda r: r["t_timed"] if r["t_timed"] is not None else r["t_course"]
+    style_of = lambda r: r["tag"].rsplit("_j", 1)[0]
+    s1 = {(r["course"], r["jit"]): r for r in rs if style_of(r) == "s1"}
+    groups = {}
+    for r in rs:
+        groups.setdefault((r["course"], style_of(r)), []).append(r)
+    rows, lines = [], [
+        "# 065 M3 (E3): S2 against S1 in closed loop, three draws (sim.Plant, RP_DET, --jit 0, "
+        "1e-9, 2e-9)", "",
+        "| course | style | budget s | results | time s (mean) | vs S1 s: mean, spread | within "
+        "budget + 0.3 %: draws; mean | plant drift m (true peak; planner's) | bought | entered | spent s | "
+        "mode changes per corner, most |", "|" + "---|" * 12]
+    for (course, st), g in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1] != "s1",
+                                                                 x[0][1])):
+        g = sorted(g, key=lambda r: r["jit"])
+        sty = g[0].get("style") or {}
+        b = sty.get("eps_lap_s", 0.0) if sty.get("name") == "drift_budget" else None
+        res = [r["result"] for r in g]
+        ts = [t(r) for r in g if t(r) is not None]
+        dts, oks = [], []
+        for r in g:
+            base = s1.get((course, r["jit"]))
+            if base and t(r) is not None and t(base) is not None:
+                dts.append(t(r) - t(base))
+                if b is not None:
+                    oks.append(dts[-1] <= b + 0.003 * t(base) + 1e-9)
+        s2s = [r.get("s2") or {} for r in g]
+        dm = [r.get("plant_drift_m", 0.0) for r in g]
+        dmg = [r.get("plant_drift_m_planner", 0.0) for r in g]
+        mc = []
+        for r in g:
+            per = {}
+            for s0, a, b2 in r["mode_changes"]:
+                c = next((c for c in _corner_keys(r) if c - 40.0 <= s0 <= c + 80.0), None)
+                per[c] = per.get(c, 0) + 1
+            mc.append(max([v for k, v in per.items() if k is not None] or [0]))
+        row = {"course": course, "style": st, "budget": b, "results": res, "t": ts,
+               "dt": dts, "within": oks, "drift_m": dm, "drift_m_planner": dmg,
+               "bought": [len(x.get("committed", {})) for x in s2s],
+               "entered": [len(x.get("debits", [])) for x in s2s],
+               "spent": [x.get("spent") for x in s2s], "mode_changes_corner": mc,
+               "solve_p95": [r["solve_p95"] for r in g], "draws": len(g)}
+        rows.append(row)
+        f = lambda v: "" if not v else f"{np.mean(v):.2f}"
+        lines.append(
+            f"| {course} | {st} | {'' if b is None else b} | "
+            f"{', '.join(sorted(set(res)))} ({len(g)}) | {f(ts)} | "
+            f"{'' if not dts else f'{np.mean(dts):+.3f}, {max(dts) - min(dts):.3f}'} | "
+            f"{'' if not oks else ('yes' if all(oks) else f'{sum(oks)} of {len(oks)}')}"
+            f"{'' if not oks else ('; mean yes' if np.mean(dts) <= b + 0.003 * np.mean(ts) else '; mean **no**')} | "
+            f"{np.mean(dm):.0f} ({min(dm):.0f}-{max(dm):.0f}); {np.mean(dmg):.0f} | "
+            f"{'' if b is None else row['bought'][0]} | "
+            f"{'' if b is None else '/'.join(map(str, row['entered']))} | "
+            f"{'' if b is None else '/'.join(str(round(x or 0, 3)) for x in row['spent'])} | "
+            f"{max(mc)} |")
+    text = "\n".join(lines) + "\n"
+    os.makedirs(M3_OUT, exist_ok=True)
+    open(os.path.join(M3_OUT, "e3.md"), "w").write(text)
+    json.dump(rows, open(os.path.join(M3_OUT, "e3.json"), "w"), indent=1)
+    print(text)
+    return rows
+
+
+def _corner_keys(r):
+    return sorted(float(k) for k in (r.get("plant_drift_corners") or {}))
+
+
 def corner_courses(widths=(6.0, 15.0)):
     out = []
     for cls in CLASSES:
@@ -1170,6 +1314,8 @@ def main():
     ap.add_argument("--traj", action="store_true",
                     help="also write the run tick by tick (<key>.traj.json: the car, each "
                          "wheel's slip against its peak, every adopted plan, the road)")
+    ap.add_argument("--prices", default=None,
+                    help="S2: the course's own prices (course-prices' json; roadmap 065 M3)")
     ap.add_argument("--jit", type=float, default=0.0,
                     help="the start speed times (1 + jit): another draw of a chaotic run")
     a = ap.parse_args()
@@ -1189,14 +1335,18 @@ def main():
         return aggregate()
     if a.what == "s2-report":
         return s2_report()
+    if a.what == "m3-report":
+        return m3_report(a.course)
     if a.what == "pareto":
         return pareto(a.course.split(","))
+    if a.what == "course-prices":              # roadmap 065 M3: the live gate's prices
+        return [course_prices(c) for c in a.course.split(",")]
     if a.what == "list":
         print("\n".join(corner_courses()))
         return
     return run(a.course, a.arm, a.err, a.seed, a.perc, a.est, a.rep, cpus[1:] if cpus else None,
                json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low,
-               style, a.digest, a.jit, a.traj)
+               style, a.digest, a.jit, a.traj, a.prices)
 
 
 if __name__ == "__main__":

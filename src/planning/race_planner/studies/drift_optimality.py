@@ -75,17 +75,18 @@ BETA_HOLD = math.radians(2.0)
 REAR_PAST = 3.0      # deg: a free plan's rear axle this far past its tyre's peak slides
 
 
-def section(R, theta, mu, sliding, grade=0.0, ds=DS, surface=None, half_width=HALF_WIDTH):
-    """The track: L_IN straight, a ramp up to 1 / R, the arc, a ramp down, the rest straight
-    (left turn), on a grid of ds, its tyre `surface` (model.tyre's; None the rig's). The arc's
-    length is what makes the whole turn theta. Returns (track, s_in, s_out): where the corner's
-    ramps start and end."""
-    s = np.arange(0.0, LENGTH + ds / 2, ds)
+def section(R, theta, mu, sliding, grade=0.0, ds=DS, surface=None, half_width=HALF_WIDTH,
+            l_in=L_IN, length=LENGTH):
+    """The track: l_in straight, a ramp up to 1 / R, the arc, a ramp down, the rest straight
+    (left turn), `length` in all, on a grid of ds, its tyre `surface` (model.tyre's; None the
+    rig's). The arc's length is what makes the whole turn theta. Returns (track, s_in, s_out):
+    where the corner's ramps start and end."""
+    s = np.arange(0.0, length + ds / 2, ds)
     arc = theta * R - RAMP
     assert arc > 0, (R, theta)
-    s1, s2, s3, s4 = L_IN, L_IN + RAMP, L_IN + RAMP + arc, L_IN + 2 * RAMP + arc
-    assert s4 + EXIT_TIMED + 20 < LENGTH, (R, theta)
-    k = np.interp(s, [0, s1, s2, s3, s4, LENGTH], [0, 0, 1 / R, 1 / R, 0, 0])
+    s1, s2, s3, s4 = l_in, l_in + RAMP, l_in + RAMP + arc, l_in + 2 * RAMP + arc
+    assert s4 + EXIT_TIMED + 20 < length, (R, theta)
+    k = np.interp(s, [0, s1, s2, s3, s4, length], [0, 0, 1 / R, 1 / R, 0, 0])
     psi = np.concatenate([[0.0], np.cumsum(0.5 * (k[1:] + k[:-1]) * ds)])
     x = np.concatenate([[0.0], np.cumsum(0.5 * (np.cos(psi[1:]) + np.cos(psi[:-1])) * ds)])
     y = np.concatenate([[0.0], np.cumsum(0.5 * (np.sin(psi[1:]) + np.sin(psi[:-1])) * ds)])
@@ -1290,6 +1291,291 @@ def s2_main(jobs):
                   round(row.get("wall_s", 0)), flush=True)
 
 
+# ---- S2's map at the live settings (roadmap 065 M3) ----
+#
+# M2's map was priced at the study's settings (grip 1, ds 2, 360 m, tol 1e-6, read 50 m past the
+# exit); the live gate compares the windows' times at the planner's: grip 0.92, ds 4, live.Driver's
+# window (at least 200 m and the braking distance from the course's top speed plus a corner), its
+# slip caps only where the track has a surface without fall-off, ending no faster than L0's speed
+# (Driver.v_end), IPOPT's tol 1e-3. At those it measured the forced asphalt drifts at 2-4 times
+# the map (docs/drift-style-m2.md, E3). `s2-live` prices every cell as the gate sees it: the
+# section with a long entry, a live.Driver on it (its settings, its extended track), the car on
+# the course's grip plan (`grip_plan`: H's windows chained, as the planner drives without a slide),
+# and from LIVE_D metres before the turn-in each of the live starts (G from that plan, D from Ds
+# and the library's Dc, B: D's seed with the floor, multistart._floor's angle; H the held
+# fallback), each plan classified as the gate does (multistart.slides_in at the planner's
+# friction), its onset at least AHEAD into the window; the loss the fastest drift's window time
+# less the fastest grip plan's (H's where no free start keeps grip: a gain, signed). The cell's
+# price is the largest over the positions (the gate needs the drift within its allowance on two
+# re-plans in a row, anywhere on the approach), its share the least.
+
+LIVE = {"ds": 4.0, "length": 200.0, "grip": 0.92}     # live.Driver's defaults
+LIVE_D = (45.0, 75.0, 105.0)       # m before the turn-in the window starts (the gate's re-plans)
+LIVE_IN = 150.0                    # m of entry straight (LIVE_D's longest and the onset's room)
+S2_LIVE_OUT = os.path.join(SWB, "play_log/race_planner/style/m3")
+_LW = {}
+
+
+def live_driver(car, track):
+    """A live.Driver on `track` (no tracker: its settings and its extended track only)."""
+    from race_planner.live import Driver
+    return Driver(car, track, None, ds=LIVE["ds"], grip=LIVE["grip"])
+
+
+def live_kwargs(d):
+    """The windows' settings multistart gives its seeds (MultiStart.__init__'s kw), unbudgeted."""
+    return {"ds": d.ds, "length": d.length, "grip": d.grip, "max_iter": 400, "beta_max": None,
+            "front_slip_max": d.front_slip_max, "rear_slip_max": d.rear_slip_max,
+            "rear_slip_low": d.rear_slip_low, "free_stages": d.free_stages}
+
+
+def live_window(car, kw, kind, deg=None):
+    """A seed's window at the live settings kw: 'free' (G, D), 'held' (H at `deg`), 'floor' (B
+    at `deg`); one per process, kind, angle and settings."""
+    key = (kind, deg, tuple(sorted(kw.items())))
+    if key not in _LW:
+        from race_planner import forced, window as wmod
+        extra = {}
+        if kind == "held":
+            extra["rear_alpha_max"] = math.radians(deg)
+        elif kind == "floor":
+            extra = forced.floor_kwargs(math.radians(deg))
+        _LW[key] = wmod.Window(car, **kw, **extra)
+    return _LW[key]
+
+
+def grip_plan(d, i_s, v0, step=10):
+    """The grip plan over d's track from node i_s at v0 (straight, on the centre line), as the
+    planner drives it without a slide: H's window (the least peak's held bound, multistart's)
+    solved from i_s, then from `step` nodes on, warm from the last, ending no faster than
+    Driver.v_end, to the track's end. Returns {"X", "U"} over nodes i_s.. (the last window's
+    end)."""
+    from race_planner import modes, window as wmod
+    from race_planner.live import warm_from
+    from race_planner.multistart import held_bound
+    t, car = d.track, d.car
+    peak = min(modes.rear_peak(car, d.grip * m, sl) for m, sl in zip(t.mu, t.sliding))
+    hw = live_window(car, live_kwargs(d), "held", held_bound(peak))
+    n = len(t.s) - i_s
+    X, U = np.zeros((6, n)), np.zeros((7, n - 1))
+    x0 = np.array([v0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    i = i_s
+    Xw, Uw = wmod.initial(hw.section(t, i), car, hw.margin, v0)
+    Xw[:, 0] = x0
+    while True:
+        hw.lam = hw.lam_x = None
+        r = hw.solve(t, i, x0, d.v_end(i), Xw, Uw)
+        r["i0"] = i
+        if i + hw.N >= len(t.s) or i + step + hw.N > len(t.s):
+            X[:, i - i_s:i - i_s + hw.N] = r["X"]
+            U[:, i - i_s:i - i_s + hw.M] = r["U"]
+            end = i - i_s + hw.N
+            return {"X": X[:, :end], "U": U[:, :end - 1]}
+        X[:, i - i_s:i - i_s + step] = r["X"][:, :step]
+        U[:, i - i_s:i - i_s + step] = r["U"][:, :step]
+        i += step
+        x0 = r["X"][:, step]
+        Xw, Uw = warm_from(hw, r, i, x0, t)
+
+
+def s2_live_case(cls, R, theta, half_width, grade=0.0, ds_list=LIVE_D):
+    """One cell at the live settings (the block's comment): per window position, every start's
+    time, mode, onset and drift metres, the gate's grip and drift picks and the loss; the cell's
+    price (the largest loss) and share (the least). grade: the road's descent (> 0 downhill,
+    section's)."""
+    from race_planner import modes
+    car, tab = make_car(), SurfaceTable.from_yaml(CLASSES)
+    sf, mu, sl = tab.tyre(cls, car), tab.mu(cls, car), tab.sliding(cls)
+    sf = None if tuple(sf) == (1.0, 1.0, 1.0, 1.0) else sf
+    ds, grip = LIVE["ds"], LIVE["grip"]
+    length = ds * math.ceil((LIVE_IN + theta * R + 2 * RAMP + EXIT_TIMED + 40.0) / ds)
+    t, _, _ = section(R, theta, mu, sl, grade, ds=ds, surface=sf, half_width=half_width,
+                      l_in=LIVE_IN, length=length)
+    d = live_driver(car, t)
+    cs = modes.corners(d.track, grip)
+    assert len(cs) == 1, (cls, R, theta, len(cs))
+    c = cs[0]
+    gp = grip_plan(d, 0, v_start(R, mu * grip))
+    pos, deg_floor = live_positions(d, c, gp, 0, ds_list)
+    row = {"surface": cls, "R": R, "theta": theta, "width": 2 * half_width, "grade": grade,
+           "mu": mu, "sliding": sl, "length": d.length, "caps": d.rear_slip_max is not None,
+           "rear_peak": math.degrees(modes.rear_peak(car, c.mu, c.sliding, c.surface)),
+           "floor_deg": deg_floor, "s_in": c.s_in, "s_out": c.s_out, "positions": pos}
+    priced = [p for p in pos if "loss_s" in p]
+    row["drift"] = len(priced) == len(pos) and bool(pos)
+    if row["drift"]:
+        row["loss_s"] = max(p["loss_s"] for p in priced)
+        row["loss_pct"] = max(p["loss_pct"] for p in priced)
+        row["share"] = min(p["share"] for p in priced)
+        row["forced"] = all(p["drift_from"] == "B" for p in priced)
+    return row
+
+
+def live_positions(d, c, gp, i_s=0, ds_list=LIVE_D):
+    """Corner c of d's track as the live gate sees it from LIVE_D metres before its turn-in, the
+    car on grip plan gp (from node i_s, grip_plan's): per position, every start's result (time,
+    mode, onset, drift metres, floor met), the gate's grip and drift picks and the loss (the
+    block's comment). Returns (positions, the floor in whole degrees)."""
+    from race_planner import forced, modes
+    from race_planner.multistart import (AHEAD, CORNER_FROM, MultiStart, drift_metres,
+                                         held_bound, slides_in)
+    t, car, grip = d.track, d.car, d.grip
+    kw = live_kwargs(d)
+    peak = modes.rear_peak(car, c.mu, c.sliding, c.surface)
+    lib = modes.Library(modes.LIBRARY)
+    ms = MultiStart.__new__(MultiStart)      # its floor rule, unchanged
+    ms.car, ms.grip = car, grip
+    ms.style = types_ns(drift_past_deg=3.0)
+    deg_floor, a_fl, b_fl, sgn = MultiStart._floor(ms, c)
+    hb = held_bound(peak)
+    wf, wh, wb = (live_window(car, kw, "free"), live_window(car, kw, "held", hb),
+                  live_window(car, kw, "floor", deg_floor))
+    pos = []
+    for dist in ds_list:
+        i0 = int(round((c.s_in - t.s[0] - dist) / d.ds))
+        if i0 < i_s + 1 or i0 + wf.N > i_s + gp["X"].shape[1]:
+            continue
+        sec = wf.section(t, i0)
+        N, j = wf.N, i0 - i_s
+        x0 = gp["X"][:, j].copy()
+        base = (gp["X"][:, j:j + N].copy(), gp["U"][:, j:j + N - 1].copy())
+        seeds = {"G": ("free", base)}
+        seeds["Ds"] = ("free", modes.seed_rear_out(*base, sec, c.s_in, c.s_out, car, peak,
+                                                   c.mu, c.sign))
+        k = lib.nearest(c)
+        if k is not None:
+            seeds["Dc"] = ("free", lib.seed(k, *base, sec, c, car))
+        seeds["B"] = ("floor", seeds["Dc" if k is not None else "Ds"][1])
+        seeds["H"] = ("held", modes_clip(base, hb, car))
+        res = {}
+        for name, (kind, (X, U)) in seeds.items():
+            w = {"free": wf, "held": wh, "floor": wb}[kind]
+            if kind == "floor":
+                forced.set_floor(w, sec.s, a_fl, b_fl, sgn)
+            w.lam = w.lam_x = None
+            r = w.solve(t, i0, x0, d.v_end(i0), np.array(X, float), np.array(U, float))
+            r["past"] = modes.past_peak(car, r["X"], grip * t.mu[i0:i0 + N],
+                                        t.sliding[i0:i0 + N],
+                                        np.vstack([getattr(t, f)[i0:i0 + N] for f in TYRE_FIELDS]))
+            on = ((r["past"] >= modes.REAR_PAST) & (r["s"] >= c.s_in - CORNER_FROM)
+                  & (r["s"] <= c.s_out))
+            res[name] = {"ok": bool(r["ok"]), "time": float(r["time"]), "status": r["status"],
+                         "iters": int(r["iters"]),
+                         "mode": "drift" if slides_in(r, c) else "grip",
+                         "onset": float(r["s"][np.argmax(on)] - r["s"][0]) if on.any() else None,
+                         "drift_m": drift_metres(r, c, 3.0),
+                         "floor": (bool(forced.floor_met(car, r["X"], r["s"], a_fl, b_fl, sgn,
+                                                         math.radians(deg_floor)))
+                                   if kind == "floor" else None)}
+        free = {kk: v for kk, v in res.items() if v["ok"] and kk != "H"}
+        grip_k = [kk for kk, v in free.items() if v["mode"] == "grip"]
+        drift_k = [kk for kk, v in free.items() if v["mode"] == "drift"
+                   and v["onset"] is not None and v["onset"] >= AHEAD]
+        g = min(grip_k, key=lambda kk: free[kk]["time"]) if grip_k else None
+        if g is None and res["H"]["ok"] and res["H"]["mode"] == "grip":
+            g = "H"
+        dk = min(drift_k, key=lambda kk: free[kk]["time"]) if drift_k else None
+        p = {"d": dist, "i0": i0, "v_end": d.v_end(i0), "starts": res, "grip_from": g,
+             "drift_from": dk}
+        if g is not None and dk is not None:
+            p["loss_s"] = res[dk]["time"] - res[g]["time"]
+            p["loss_pct"] = 100.0 * p["loss_s"] / res[g]["time"]
+            p["share"] = res[dk]["drift_m"] / (c.s_out - c.s_in + CORNER_FROM)
+        pos.append(p)
+    return pos, deg_floor
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+def modes_clip(base, bound, car):
+    """H's start (multistart._held_seed): the base with the rear axle's slip clipped into the
+    bound (degrees) less 0.2 deg, the first node kept."""
+    X, U = (np.array(v, float) for v in base)
+    tb = math.tan(math.radians(bound) - math.radians(0.2))
+    cc = car.lr * X[2, 1:]
+    X[1, 1:] = np.clip(X[1, 1:], cc - tb * X[0, 1:], cc + tb * X[0, 1:])
+    return X, U
+
+
+def s2_live_grid():
+    """s2_grid's cells and the same at 45 deg (the kinks a course has: Haruna's 33 and 46 deg
+    corners were priced from 90 deg cells), where the arc is longer than its ramps."""
+    yield from s2_grid()
+    for cls in S2_CLASSES:
+        for R in RADII:
+            if math.pi / 4 * R <= RAMP + 2.0:
+                continue
+            ws = WIDTHS if cls in W_CLASSES and R <= 25.0 else (8.0,)
+            for w in ws:
+                yield (cls, R, math.pi / 4, 0.5 * w)
+
+
+def s2_live_run(args):
+    c = time.time()
+    try:
+        row = s2_live_case(*args)
+    except Exception as e:
+        import traceback
+        return {"args": list(args), "error": repr(e), "trace": traceback.format_exc()}
+    row["wall_s"] = time.time() - c
+    return row
+
+
+def s2_live_main(jobs):
+    """The live-settings grid (s2_grid's cells): S2_LIVE_OUT/s2-live.jsonl, resumed if stopped."""
+    import json
+    os.makedirs(S2_LIVE_OUT, exist_ok=True)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    path = os.path.join(S2_LIVE_OUT, "s2-live.jsonl")
+    done = set()
+    if os.path.exists(path):
+        for line in open(path):
+            r = json.loads(line)
+            if "error" not in r:
+                done.add((r["surface"], r["R"], round(r["theta"], 4), r["width"]))
+    cases = [c for c in s2_live_grid() if (c[0], c[1], round(c[2], 4), 2 * c[3]) not in done]
+    with open(path, "a") as f, ProcessPoolExecutor(jobs) as ex:
+        for i, row in enumerate(ex.map(s2_live_run, cases, chunksize=4)):
+            f.write(json.dumps(row) + "\n")
+            f.flush()
+            print(i, row.get("surface"), row.get("R"), row.get("width"),
+                  round(math.degrees(row.get("theta", 0))), row.get("loss_s"), row.get("share"),
+                  row.get("forced"), row.get("error"), round(row.get("wall_s", 0)), flush=True)
+
+
+def drift_losses_live():
+    """race_planner/drift_losses.json at the live settings (roadmap 065 M3) from s2-live.jsonl:
+    per class, per cell, the price (the largest loss over the window positions, s of the live
+    window's time; < 0 a gain), the least share, and whether every position's drift was B's."""
+    import json
+    from race_planner.budget import LossMap
+    rows = [json.loads(x) for x in open(os.path.join(S2_LIVE_OUT, "s2-live.jsonl"))]
+    cells = {}
+    for r in rows:
+        if "error" in r:
+            continue
+        key = (r["R"], r["theta"], r["width"])
+        ok = r.get("drift")
+        cells.setdefault(r["surface"], {})[key] = [
+            r["R"], r["theta"], r["width"], round(r["loss_s"], 5) if ok else None,
+            round(r["share"], 4) if ok else None, bool(r.get("forced")) if ok else False]
+    m = LossMap({c: [v[k] for k in sorted(v)] for c, v in cells.items()},
+                {"concrete": "asphalt", "mud_soft": "mud_wet", "sand_loose": "sand"})
+    m.save(note="roadmap 065 M3: built by studies/drift_optimality.py drift-losses-live from the "
+                "s2-live grid (S2_LIVE_OUT): the live settings (grip 0.92, ds 4, the 200 m window, "
+                "tol 1e-3), the car on the cell's grip plan 45, 75 and 105 m before the turn-in. "
+                "[R m, turn rad, width m, loss s (the fastest drift's window time less the fastest "
+                "grip plan's, the largest over the positions; < 0 a gain; None: no drift at some "
+                "position), share of the zone (the least), forced (every position's drift B's)]")
+    for c, v in m.cells.items():
+        n = sum(1 for x in v if x[3] is not None)
+        print(c, f"{n}/{len(v)} cells with a drift;",
+              [(x[0], round(math.degrees(x[1])), x[2], x[3]) for x in v])
+
+
 def drift_losses():
     """race_planner/drift_losses.json, S2's signed map (roadmap 065 M2; budget.LossMap) from the
     s2-signed grid: per class, per cell (R, turn, width), the best drift's loss against the best
@@ -1534,6 +1820,10 @@ def main():
         return s2_forced_main(int(sys.argv[2]) if len(sys.argv) > 2 else 2)
     if sys.argv[1:] == ["drift-losses"]:             # race_planner/drift_losses.json (065 M2)
         return drift_losses()
+    if sys.argv[1:2] == ["s2-live"]:                 # S2's map at the live settings (065 M3)
+        return s2_live_main(int(sys.argv[2]) if len(sys.argv) > 2 else 2)
+    if sys.argv[1:] == ["drift-losses-live"]:        # drift_losses.json from s2-live (065 M3)
+        return drift_losses_live()
     if sys.argv[1:] == ["m3b-width-report"]:
         return width_report()
     if sys.argv[1:] == ["library"]:                  # race_planner/corner_library.npz (M3)

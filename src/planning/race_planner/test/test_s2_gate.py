@@ -60,6 +60,31 @@ def test_a_bought_corner_leaves_its_drift_only_outside_price_plus_hysteresis_twi
     assert m.mode == "grip"
 
 
+def test_a_drift_carried_into_another_bought_corner_is_entered_and_paid_there():
+    # issue 010: the mode spans corners; the next bought corner's own rule and debit apply
+    m = gate(eps_lap_s=0.5, committed={100.0: Price(0.1, 0.6, ()), 300.0: Price(0.05, 0.6, ())})
+    m.choose(res(20.0, ((20.1, 30.0),)))
+    m.choose(res(20.0, ((20.1, 30.0),)))
+    assert m.mode == "drift" and m.s2.account.spent == pytest.approx(0.1)
+    m._corner = OTHER                                         # still drifting, the next corner
+    assert m.choose(res(20.0, ((20.08, 30.0),))) == "D"      # 0.08 <= 0.05 + 0.06: entered
+    assert m.s2.account.spent == pytest.approx(0.15)
+    assert m.s2.account.debited(300.0)
+
+
+def test_a_drift_carried_into_a_corner_it_does_not_fit_is_left_on_two_replans():
+    m = gate(eps_lap_s=0.5, committed={100.0: Price(0.1, 0.6, ()), 300.0: Price(0.02, 0.6, ())})
+    m.choose(res(20.0, ((20.1, 30.0),)))
+    m.choose(res(20.0, ((20.1, 30.0),)))
+    m._corner = OTHER
+    # 0.1 s > 0.02 + 0.06: not this corner's drift, though inside the old corner's exit band
+    assert m.choose(res(20.0, ((20.1, 30.0),))) == "D"       # once
+    assert m.choose(res(20.0, ((20.1, 30.0),))) == "G"       # twice: left
+    assert m.mode == "grip"
+    assert not m.s2.account.debited(300.0)
+    assert m.s2.account.spent == pytest.approx(0.1)
+
+
 def test_a_corner_neither_bought_nor_lex_is_s1s():
     m = gate()
     for _ in range(3):                                        # slower: S1 stays grip
@@ -228,3 +253,22 @@ def test_the_driver_with_no_budget_buys_nothing_dear():
     assert all(r.get("s2") is None for r in d.multi.records)
     assert not any("s2 budget" in r["why"] for r in d.multi.records)
     assert not any("B" in r["seeds"] for r in d.multi.records)
+
+
+def test_the_forced_floor_is_past_the_cars_own_peak_not_the_planners():
+    # roadmap 065 M3: the planner's peak (grip 0.92) is 1.25 deg earlier on asphalt; a floor
+    # past it left the car 1.9 deg past its real one
+    import math
+    from race_planner import modes
+    from race_planner.car import Car
+    from test_ocp import SPEC
+    car = Car.from_spec(SPEC)
+    m = MultiStart.__new__(MultiStart)
+    m.car, m.grip, m.style = car, 0.92, Style(name="drift_budget")
+    c = types.SimpleNamespace(s_in=100.0, s_out=140.0, sign=1.0, mu=0.92 * 1.12, sliding=0.8,
+                              surface=None)
+    deg = m._floor(c)[0]
+    real = math.degrees(modes.rear_peak(car, 1.12, 0.8))
+    planner = math.degrees(modes.rear_peak(car, 0.92 * 1.12, 0.8))
+    assert real > planner + 1.0
+    assert deg == math.ceil(real + 3.0 - 1e-9)

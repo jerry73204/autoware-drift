@@ -102,3 +102,30 @@ def test_the_account_is_debited_once_and_never_credited():
     a.debit("c2", 0.1)
     assert a.remaining == pytest.approx(0.05) and a.free() == pytest.approx(0.05)
     assert [d["key"] for d in a.debits] == ["c1", "g", "c2"]
+
+
+def test_a_course_price_takes_the_place_of_the_maps(tmp_path):
+    # roadmap 065 M3: a corner the course priced uses its own (largest loss over the positions,
+    # least share), one with no drift at some position is unpriced, one not priced the map's
+    import json
+    import types
+    from race_planner.budget import CoursePrices, S2Lap
+    from race_planner.style import Style
+    pos = lambda *ls: [{"d": 45.0, "loss_s": x, "share": 0.4 - 0.1 * k, "drift_from": "B"}
+                       if x is not None else {"d": 45.0} for k, x in enumerate(ls)]
+    path = tmp_path / "prices.json"
+    json.dump({"corners": [{"s_in": 100.0, "positions": pos(0.05, 0.09)},
+                           {"s_in": 300.0, "positions": pos(-0.02, None)},
+                           {"s_in": 500.0, "positions": []}]}, open(path, "w"))
+    cp = CoursePrices.load(path)
+    assert cp.lookup(101.0)[1].loss_s == pytest.approx(0.09)
+    assert cp.lookup(100.0)[1].share == pytest.approx(0.3)
+    assert cp.lookup(300.0) == (True, None)
+    assert cp.lookup(500.0) == (False, None)
+    cs = [types.SimpleNamespace(s_in=s, s_out=s + 40.0, R=25.0, turn=math.pi / 2)
+          for s in (100.0, 300.0, 500.0)]
+    lap = S2Lap.build(Style(name="drift_budget", eps_lap_s=0.2), cs,
+                      lambda c: ({"asphalt": 1.0}, 8.0), _map(), lambda k: False, course=cp)
+    assert lap.priced[100.0].loss_s == pytest.approx(0.09)
+    assert lap.priced[300.0] is None
+    assert lap.priced[500.0] == _map().lookup("asphalt", 25.0, math.pi / 2, 8.0)

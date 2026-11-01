@@ -164,7 +164,8 @@ class MultiStart:
 
     def __init__(self, driver, threshold=THRESHOLD, confirm=CONFIRM, ahead=AHEAD, flick=False,
                  seed_budget=None, max_iter=400, cpus=None, library=True, schedule=None,
-                 perception=None, h_competes=False, style=None, loss_map=None, lap=None):
+                 perception=None, h_competes=False, style=None, loss_map=None, lap=None,
+                 course_prices=None):
         """schedule (roadmap 061 M3b): None, M3's fixed starts ({G, D}, F with `flick`, G in a
         process of its own); else the starts chosen per re-plan by a schedule.Scheduler built
         from this dict (its keyword arguments: table, a track.SurfaceTable, default swb's;
@@ -179,7 +180,9 @@ class MultiStart:
         needs the schedule (refused without it: ValueError naming 'name'); S3 is refused
         (NotImplementedError). loss_map: S2's budget.LossMap or its path (default
         budget.LOSS_MAP); lap: S2's budget per lap of this length (m) on a circuit driven as
-        laps (serve.py's), None per run (design 065 call 3)."""
+        laps (serve.py's), None per run (design 065 call 3). course_prices: S2's budget.
+        CoursePrices or its path (roadmap 065 M3), the course's own corners priced offline at the
+        live settings; None, the map's only."""
         d = driver
         from race_planner.style import as_style
         self.style = as_style(getattr(d, "style", None) if style is None else style)
@@ -188,6 +191,7 @@ class MultiStart:
             raise ValueError("'name': drift_budget needs the scheduled starts (multistart's "
                              "schedule): its drifts are bought from the drift map")
         self.loss_map, self.lap, self.s2 = loss_map, lap, None
+        self.course_prices = course_prices
         self.car, self.track, self.grip = d.car, d.track, d.grip
         self.threshold, self.confirm, self.ahead = threshold, confirm, ahead
         self.scheduler, self.perception = None, perception
@@ -482,16 +486,31 @@ class MultiStart:
             if g is None:                    # no grip plan: the drift (S1 changes mode too)
                 self.mode, self.count = "drift", 0
                 lap.account.debit(c.s_in, predicted, kind + ", no grip plan")
+                self._s2_drift = c.s_in
             elif enter and ok[d]["onset"] is not None and ok[d]["onset"] >= self.ahead:
                 self.count += 1
                 if self.count >= self.confirm:
                     self.mode, self.count = "drift", 0
                     lap.account.debit(c.s_in, predicted, kind)
+                    self._s2_drift = c.s_in
             else:
                 self.count = 0
         else:
             if d is None:                    # the slide is over, or no drift plan
                 self.mode, self.count = "grip", 0
+            elif getattr(self, "_s2_drift", None) != c.s_in:
+                # a drift carried in from another corner (issue 010): this corner's entry rule
+                # (its allowance, or no grip plan), then its debit; else left as by the exit rule
+                info["carried"] = True
+                if g is None or enter:
+                    self.count = 0
+                    lap.account.debit(c.s_in, predicted,
+                                      kind + (", no grip plan" if g is None else "") + ", carried")
+                    self._s2_drift = c.s_in
+                else:
+                    self.count += 1
+                    if self.count >= self.confirm:
+                        self.mode, self.count = "grip", 0
             elif stay:
                 self.count = 0
             else:
@@ -663,9 +682,12 @@ class MultiStart:
 
     def _floor(self, c):
         """S2's floor for corner c: (whole degrees past which the rear is held, from its turn-in,
-        to its middle, its hand) (forced.py; the peak at the planner's friction there)."""
+        to its middle, its hand) (forced.py). The peak is the tyre's at the map's friction there
+        (c.mu / grip), not the planner's: a drift is the car's rear past its own peak, and on
+        asphalt the planner's (grip 0.92) peaks 1.25 deg earlier, so a floor 3 deg past it held
+        the car 1.9 deg past its real one (roadmap 065 M3)."""
         from race_planner import forced
-        peak = modes.rear_peak(self.car, c.mu, c.sliding, c.surface)
+        peak = modes.rear_peak(self.car, c.mu / self.grip, c.sliding, c.surface)
         deg = int(round(math.degrees(forced.angle_for(peak, self.style.drift_past_deg))))
         return (deg, float(c.s_in), float(0.5 * (c.s_in + c.s_out)), float(c.sign))
 
@@ -673,10 +695,14 @@ class MultiStart:
         """S2's plan for the run (budget.S2Lap), built at the first S2 re-plan and again when the
         style changes (a new account: the budget counts from the change)."""
         if self.s2 is None or self.s2.style != self.style:
-            from race_planner.budget import LossMap, S2Lap
+            from race_planner.budget import CoursePrices, LossMap, S2Lap
             lm = self.loss_map
             if not isinstance(lm, LossMap):
                 lm = LossMap.load() if lm is None else LossMap.load(lm)
+            cp = getattr(self, "course_prices", None)
+            if cp is not None and not isinstance(cp, CoursePrices):
+                cp = CoursePrices.load(cp)
             classes, flat = s2_classes(self.scheduler, self.track)
-            self.s2 = S2Lap.build(self.style, self.corners, classes, lm, flat, lap=self.lap)
+            self.s2 = S2Lap.build(self.style, self.corners, classes, lm, flat, lap=self.lap,
+                                  course=cp)
         return self.s2

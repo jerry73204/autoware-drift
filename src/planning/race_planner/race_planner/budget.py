@@ -166,6 +166,44 @@ class Account:
 ZONE_FROM = 30.0        # m before a corner's turn-in its zone starts (multistart.CORNER_FROM)
 
 
+class CoursePrices:
+    """A course's own corners priced offline at the live settings (roadmap 065 M3; studies/
+    mode_choice_m4.py `course-prices`): per corner (its turn-in s, m) the largest live loss over
+    the gate's window positions and the least share, or no drift at some position (None). The
+    cell map's synthetic corners are flat and stand alone; a course's grade, its corners' run
+    and its speeds change the price (Haruna: its downhill hairpins gain, its R 37 kink costs
+    0.15-0.93 s against the map's 0.03-0.13), so where a course has been priced its own price
+    is used, and the map only for corners it has none for."""
+
+    TOL = 2.0               # m: a corner's turn-in matched to a priced one within this
+
+    def __init__(self, prices):
+        self.prices = {float(k): v for k, v in prices.items()}
+
+    @classmethod
+    def load(cls, path):
+        d = json.load(open(path))
+        out = {}
+        for c in d["corners"]:
+            pos = c.get("positions") or []
+            if not pos:
+                continue                    # not priced (too near the start): the map's
+            pr = [p for p in pos if "loss_s" in p]
+            out[c["s_in"]] = (None if len(pr) < len(pos) else
+                              Price(max(p["loss_s"] for p in pr), min(p["share"] for p in pr),
+                                    ("course", c["s_in"]),
+                                    all(p.get("drift_from") == "B" for p in pr)))
+        return cls(out)
+
+    def lookup(self, s_in):
+        """(True, its Price or None) where the course priced the corner at s_in; (False, None)
+        where it did not."""
+        for k, v in self.prices.items():
+            if abs(k - s_in) <= self.TOL:
+                return True, v
+        return False, None
+
+
 class S2Lap:
     """S2's plan for a run (design 4.3; call 3): which corners the lap budget buys
     (`committed`: corner s_in -> Price, the knapsack's), which the live lex-eps gate may take
@@ -195,7 +233,7 @@ class S2Lap:
         return self.committed.get(c.s_in) or self.lex.get(c.s_in)
 
     @classmethod
-    def build(cls, style, corners, corner_classes, lossmap, flat, lap=None):
+    def build(cls, style, corners, corner_classes, lossmap, flat, lap=None, course=None):
         """corners: modes.Corner list; corner_classes(c) -> ({class: probability}, width m);
         lossmap: LossMap; flat(cls) -> True where the class has no fall-off past its peak.
         A corner's price is its worst probable class's (None if any has none); the knapsack
@@ -203,12 +241,18 @@ class S2Lap:
         value. With eps_window set, every corner whose classes are all flat and not bought is
         the lex gate's. lap: the budget per lap of this length (m; corners grouped by the lap
         their turn-in is on, each lap its own knapsack, the account eps_lap_s a lap), None: per
-        run."""
+        run. course: CoursePrices, a corner's own price where it has one (the map's otherwise).
+        A course price is per lap position, so it applies to the lap it was made on: on laps
+        after the first the corner is matched by its turn-in less the lap's length."""
         priced, items, flat_corners = {}, [], set()
         for c in corners:
             probs, width = corner_classes(c)
-            ps = [lossmap.lookup(k, c.R, c.turn, width) for k in probs]
-            p = None if not ps or any(x is None for x in ps) else max(ps, key=lambda x: x.loss_s)
+            has, p = (False, None) if course is None else course.lookup(
+                c.s_in if not lap else c.s_in % lap)
+            if not has:
+                ps = [lossmap.lookup(k, c.R, c.turn, width) for k in probs]
+                p = (None if not ps or any(x is None for x in ps)
+                     else max(ps, key=lambda x: x.loss_s))
             priced[c.s_in] = p
             if p is not None:
                 items.append((c.s_in, p.loss_s, p.share * (c.s_out - c.s_in + ZONE_FROM)))
