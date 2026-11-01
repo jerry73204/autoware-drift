@@ -29,7 +29,7 @@ slides). All three finish the 1.43 km stretch within 1.5 s of each other.</sub><
 ## What it does
 
 - **Plans while driving.** Each second, from the car's measured state, it solves a
-  minimum-time problem over the next 200–260 m. Recovery is re-planning, not steering back to
+  minimum-time problem over the next 200-260 m. Recovery is re-planning, not steering back to
   an old line.
 - **Holds a slide on purpose.** The tracker follows the plan's sideslip and yaw rate as well
   as its path. A planned drift is driven, not merely tolerated.
@@ -51,44 +51,7 @@ slides). All three finish the 1.43 km stretch within 1.5 s of each other.</sub><
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    subgraph inputs[Inputs]
-        course["Course<br/>centre line, width, surface classes"]
-        spec["Vehicle spec<br/>tyres, motor, brakes, steering"]
-        style["Driving style<br/>fastest · drift_budget · drift_max"]
-    end
-
-    subgraph planner["race_planner"]
-        L0["L0 · whole-track plan, offline<br/>minimum time, IPOPT"]
-        sched["Start schedule<br/>which starts, by surface ahead"]
-        subgraph L1box["L1 · window planner, ~1 Hz"]
-            G["G: previous plan"]
-            H["H: grip at the peak"]
-            D["D: rear-out drift"]
-            F["F: flick"]
-            gate{"Gate<br/>fastest feasible plan;<br/>drift only if > 0.3 % faster"}
-            G & H & D & F --> gate
-        end
-        L2["L2 · tracker, 50 Hz<br/>RTI NMPC on HPIPM<br/>line, speed, sideslip, yaw rate"]
-        est["Friction estimate<br/>only lowers, holds in a slide"]
-    end
-
-    subgraph car["The car"]
-        ecu["ECU<br/>drive, brakes, ABS / TC / ESC, steering"]
-        veh["Vehicle<br/>Isaac PhysX, or the test plant"]
-    end
-
-    course --> L0 & sched
-    spec --> L0 & L1box & L2
-    style --> sched & gate & L2
-    L0 -- "speed reference" --> L1box
-    sched --> L1box
-    gate -- "plan: path, speed, sideslip, yaw rate, inputs" --> L2
-    L2 -- "steering, acceleration request" --> ecu --> veh
-    veh -- "state: pose, velocity, wheel speeds" --> est & L1box & L2
-    est --> L1box & L2
-```
+<p align="center"><img src="docs/media/architecture.svg" width="860" alt="race_planner's layers: course, style and vehicle spec feed the offline plan and the start schedule; L1 solves the starts G, H, D and F in parallel and a gate picks one; L2 tracks it at 50 Hz through the car's ECU; the car's state and friction estimate feed back"></p>
 
 - **L0** solves the whole track once (minutes), as a speed reference.
 - **L1** re-plans a window from the car's state within a one-second budget. It runs each
@@ -99,11 +62,12 @@ flowchart TB
   style decides which starts run, which constraints apply and what the gate may adopt.
 
 Design:
-[live planner](docs/superpowers/specs/2026-10-29-live-race-planner-design.md) ·
-[offline planner](docs/superpowers/specs/2026-10-29-min-time-planner-design.md) ·
-[driving styles](docs/superpowers/specs/2026-10-31-drift-style-layer-design.md) ·
-[when drifting pays](docs/drift-optimality.md) ·
+[live planner](docs/superpowers/specs/2026-10-29-live-race-planner-design.md),
+[offline planner](docs/superpowers/specs/2026-10-29-min-time-planner-design.md),
+[driving styles](docs/superpowers/specs/2026-10-31-drift-style-layer-design.md),
+[when drifting pays](docs/drift-optimality.md),
 [how the grip-or-drift choice is made](docs/mode-choice-methods.md).
+The diagrams are Typst sources in [docs/diagrams/](docs/diagrams/) (`typst compile --format svg`).
 
 ## How it fits into Autoware
 
@@ -112,34 +76,7 @@ the command gate, MRM and diagnostics) and hands over the two things it cannot d
 the speed profile and the controller. The seams are Autoware's own topics, so nothing in
 Autoware is forked.
 
-```mermaid
-flowchart LR
-    subgraph aw["Autoware (kept)"]
-        mission["Mission planner<br/>route, goal"]
-        ndt["Localization<br/>NDT"]
-        gate["vehicle_cmd_gate<br/>limits opened for racing"]
-        modes["Operation modes, MRM,<br/>ADAPI, diagnostic graph"]
-    end
-
-    subgraph race["autoware-drift race stack"]
-        rp["Race planner<br/>L0 + L1 + style"]
-        rc["Race controller<br/>L2"]
-        re["Race estimator<br/>vx, vy, yaw rate, pose"]
-    end
-
-    veh["Vehicle interface<br/>(Isaac via swb, or a real car)"]
-
-    mission -- route --> rp
-    ndt -- pose --> re
-    re -. "initial guess" .-> ndt
-    re -- "/race/state" --> rp & rc
-    rp -- "/planning/scenario_planning/trajectory" --> modes
-    rp -- "/race/plan<br/>sideslip and yaw rate per point" --> rc
-    rc -- "/control/trajectory_follower/control_cmd" --> gate
-    modes --- gate
-    gate --> veh
-    veh -- "status, IMU, wheel speeds" --> re
-```
+<p align="center"><img src="docs/media/autoware-integration.svg" width="860" alt="Autoware keeps the mission planner, operation modes and MRM, localization and the command gate; the race planner publishes Autoware's trajectory topic and /race/plan, the race controller publishes the trajectory follower's command into the gate, the race estimator feeds both and gives NDT its initial guess"></p>
 
 - **Replaced:** scenario planning's output (the race planner publishes Autoware's trajectory
   topic) and the trajectory follower (`trajectory_follower_mode:=none`; the race controller
