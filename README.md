@@ -14,8 +14,8 @@ It is not tied to one simulator, road or car:
   progress.
 - **Cars** come from a vehicle spec (mass, tyres, motor, brakes, steering).
 - **Driving it** today happens in NVIDIA Isaac Sim through
-  [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario-world-bridge) (swb). Its
-  roadmap holds this project's phases (057, 058, 060, 061, 065).
+  [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario-world-bridge) (swb), which
+  also builds the courses and surfaces.
 
 <p align="center">
   <img src="docs/media/haruna_three_ways.gif" width="720"
@@ -99,8 +99,7 @@ drift does to stock Autoware: [docs/autoware-in-a-drift.md](docs/autoware-in-a-d
 | Race nodes on Autoware's seams (diagram above) | designed, not built. Today the live planner drives the car directly through swb's Isaac course runner, without Autoware in the loop |
 | `drift_controller`: a drift law inside stock Autoware (the first approach) | built; a full Town05 ring lap with Autoware and a held drift. It showed why a race stack was needed |
 
-Dated results, rulings and open issues: [docs/issues/](docs/issues/), the `docs/mode-choice-*.md`
-reports, and swb's [roadmap](https://github.com/NEWSLabNTU/scenario-world-bridge/tree/main/docs/roadmap).
+Known limitations, each with its cause: [docs/issues/](docs/issues/).
 
 ## Layout
 
@@ -110,7 +109,7 @@ reports, and swb's [roadmap](https://github.com/NEWSLabNTU/scenario-world-bridge
 | `src/control/drift_controller` | the first approach: a drift state machine (`law.py`) and a ROS node between Autoware's command gate and the vehicle |
 | `src/launcher/drift_launch` | that approach's launch, Autoware parameter overrides (gate, smoother, diagnostic graph) and the Town05 ring scenario |
 | `tools/` | proof videos (`lap_video.py` for Isaac runs, `arm_video.py` for side-by-side runs), lap analysis |
-| `docs/` | designs, studies, issues |
+| `docs/` | designs, studies, known limitations |
 
 The test car, `drift_mustang` (1450 kg, 50:50, a 330 kW rear motor, a locked rear axle,
 58° of steering lock), is defined once in
