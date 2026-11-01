@@ -220,3 +220,89 @@ refuses the corners whose live cost exceeds their price, and it is why the budge
   tell issue 009's owner).
 - Packed snow: priced None at one position; a finer position set or the map's price there.
 - Course prices for Tsukuba and the zone chain (061's off-road at s 1236 still stands).
+
+## 7. M3 closed (2026-11-02): timed E3, the leftovers, DP2
+
+(On autoware-drift 9619095 and later: issue 012's line weight and issue 013's held-road braking in;
+Haruna and Tsukuba S1 bit for bit, `9524862c` / `9160b94d` 76.28 s, `d7ca9f95` / `82bd3c28` 74.33 s,
+no record and `fastest`, `m4/s1id/`. Results under swb's `play_log/race_planner/style/m3t/`.)
+
+**Timed E3.** The clock in: IPOPT cut by its wall budget (G 1.0 s, every other start 0.9 s), a plan
+adopted at max(1 s, the re-plan's wall time). Three draws (`--jit`) a run, one run at a time, each
+started only when the host's 1-minute load was under 6 (it was 4-6.3; recorded per run), on the six
+physical cores that were idlest over the 3 s before (both SMT siblings), and kept only if the load
+at its end was under 8 and fewer than 10 % of its re-plans ran their slowest start slower than
+8.5 ms an IPOPT iteration (idle: 4-5.5 ms for G, D, H; 7 ms for B, whose floor rows cost more).
+Two Haruna runs measured into a neighbour's batch (per-iteration time doubling mid-lap) were
+thrown out and run again (`m3t/invalid/`), as were the first three, run on fixed cores (`first/`). L1 p95 and p99 pool every re-plan of the three draws.
+
+| course | arm | time s, mean | vs S1, mean (draws) | within budget + 0.3 % | L1 p95 s (draws) | L1 p99 s | adoption p99 s | overruns of 1 s | plant drift m (draws) |
+|---|---|---|---|---|---|---|---|---|---|
+| Haruna | S1 | 76.44 | | | 0.610 (0.64, 0.58, 0.60) | 0.929 | 1.000 | 2 of 224 | 0, 0, 0 |
+| | S2 0.1 s | 76.73 | +0.29 (+0.02, +0.23, +0.62) | 2 of 3; mean yes | 0.756 (0.68, 0.74, 0.85) | 0.914 | 1.000 | 1 of 224 | 22, 64, 33 |
+| | S2 0.5 s | 76.59 | +0.15 (+0.15, -0.15, +0.45) | 3 of 3 | **0.914** (0.86, 0.94, 0.91) | 1.003 | 1.003 | 4 of 225 | 38, 9, 42 |
+| | S2 0.5 s, B capped at 110 iterations | 76.74 | +0.30 (+0.15, +0.16, +0.59) | 3 of 3 | 0.793 (0.79, 0.65, 0.90) | 0.914 | 1.000 | 1 of 225 | 8, 9, 58 |
+| asphalt R 25 x 90 | S1 | 9.50 | | | 0.615 | 0.791 | 1.000 | 0 of 27 | 0 |
+| | S2 0.2 s | 9.44 | -0.06 | 3 of 3 | **0.916** | 0.919 | 1.000 | 0 of 27 | 0, 0, 0 |
+| | S2 0.2 s, B capped | 9.42 | -0.08 | 3 of 3 | 0.916 | 0.917 | 1.000 | 0 of 27 | 0, 0, 0 |
+| dirt R 25 x 90 | S1 | 12.25 | | | **1.003** | 1.004 | 1.004 | 3 of 36 | 0 |
+| | S2 0.1 s | 12.07 | -0.18 | 3 of 3 | 1.002 | 1.005 | 1.005 | 4 of 36 | 0, 0, 0 |
+| | S2 0.1 s, B capped | 12.04 | -0.21 | 3 of 3 | 1.003 | 1.004 | 1.004 | 4 of 36 | 0, 0, 0 |
+
+(`m3t/*.json`; per re-plan, every start's wall time, iterations and warm start: `replan_seeds`.)
+
+1. **R6 is met by S2 on Haruna at 0.1 s (0.76 s) and missed at 0.5 s (0.914 s).** What sets the
+   tail is not B alone: every start that reaches its budget ends at the budget plus 10-20 ms of
+   messaging. On Haruna at 0.5 s, B and D are cut at 0.90 s on a bought corner's approach, G at
+   1.00 s where it runs alone after one. On the corner courses D sets it at 0.91 s (asphalt), and
+   on dirt **S1 itself is at 1.00 s**: G alone hits its own 1.0 s budget after the corner, three
+   re-plans in 36. So R6 (p95 <= 0.9 s) cannot hold wherever 5 % of the re-plans run a start to
+   its budget, in any style, as long as the budgets are 0.9 and 1.0 s.
+2. **Adoption p99 is 1.000-1.005 s in every arm**: a plan is never more than 5 ms later than the
+   latency it was made for, because the clock cuts every solve. The cost of a cut is a worse or
+   failed plan, not a late one.
+3. **B's own iteration budget** (`MultiStart(b_max_iter=)`, the harness's `--b-iter`): a B
+   iteration costs 7 ms against G's 4-5.5 (its floor rows), so at the 0.9 s budget B is cut by the
+   clock near 125 iterations. Capped at 110 it ends by about 0.8 s and Haruna's p95 falls to
+   0.79 s, but by failing B: 45 of 138 B solves were cut (10 of 96 uncapped), B was adopted 5
+   times against 8, and on the asphalt corner B never converged (0 adoptions against 8). On the
+   corners the cap changes nothing (D sets the tail). So the cap buys R6 by removing the forced
+   drift it exists for: **not the default** (`b_max_iter=None`); the option stays for the study.
+4. **The budget holds timed as it did unclocked**: every mean within budget + 0.3 %, one Haruna
+   draw at 0.1 s over (+0.62 against 0.33), inside S1's own draw spread (0.39 s). Haruna's drift
+   at 0.1 and 0.5 s is 40 and 29 m a lap (det: 36 and 40), spread 9-64 m; the corner courses drive
+   no slide past the car's peak when timed (det: 6 and 28 m): their B plans are cut before they
+   converge more often than not (B adopted 8 times in three draws on each).
+
+**The leftovers.**
+
+- **Course prices for Tsukuba and the zone chain** (`m3t/prices_tsukuba.json`, `prices_zones.json`).
+  Tsukuba's corners price 0.03-0.21 s live (map 0.07-0.09); its hairpins at s 544 and 1173 swing
+  0.01-0.21 s between the three positions. E3 (det, x3): S2 0.1 s is 0.56 s faster than S1 (73.73
+  against 74.29; 0.17-0.87 a draw) and slides 0 m past the car's peak, buying s 761 and s 837
+  (0.085 s booked); S2 0.5 s +0.30 s (within 0.72), 43 / 3 / 2 m of drift. The zone chain: S1 and
+  S2 0.5 s leave the road in every draw (s 820-1076, both; after issue 012 farther than the
+  s 250-270 before it); S2 prices it but cannot be judged on it.
+- **Packed snow priced.** A corner is now priced when at least two of its three approach
+  positions show a drift (`CoursePrices.MIN_PRICED`): the gate enters a drift seen on two
+  re-plans in a row, so the third position's "no drift" said only that the drift starts later.
+  Packed snow R 15 x 90 prices 0.037 s; S2 at 0.1 s buys it and is 0.42 s faster than S1 (23.21
+  against 23.63, all three draws), drifting 21.7 m against S1's 19.9, entered at s 32 instead of
+  S1's s 148. Every course priced before had all three positions or none, so nothing else moved.
+- **The lex gate on a flat corner that finishes.** With the car at sim_vehicle_ecu 760cd78 (issue
+  011) and issue 012's line weight, S1 finishes both mud corners again, 6 of 6. The lex gate
+  (eps_window 0.01) enters and debits its corner (0.041 / 0.032 s) and drives the same lap as S1
+  to the last digit: on these corners S1's own gate already takes the drift (G slides freely on
+  mud), so the lex gate only books what S1 drives anyway. It is safe and changes nothing here; a
+  flat corner where S1 refuses the drift is still to be found.
+
+**DP2** (user, 2026-11-01: tune, then adopt; adopt once a timed E3 shows L1 p95 <= 0.9 s, else B
+its own iteration budget). Builder's ruling with the numbers: **do not adopt yet.** Timed, S2
+meets R6 at 0.1 s on Haruna (0.76 s) and misses it at 0.5 s (0.914 s); B's own iteration budget
+meets it (0.79 s) only by failing B's plans, and does nothing on the corner courses, where D (S2,
+0.916 s) and G (S1 too, 1.00 s on dirt) set the tail. R6 as written is a limit of the budgets
+(0.9 s a seed, 1.0 s for G, plus messaging), not of S2: S1 misses it on the dirt corner. The next
+step is R6's, not S2's: seed budgets that end inside 0.9 s with the messaging (e.g. 0.85 s a seed
+and G), which touches S1's timed runs (not its RP_DET digests) and is the user's call, or B warm
+started from its last plan on the next corner, which cuts its iterations without cutting its
+plans. S2 stays selectable (it always was: a style record), with the live gate and course prices.
