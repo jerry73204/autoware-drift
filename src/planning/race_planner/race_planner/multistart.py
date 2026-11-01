@@ -165,7 +165,7 @@ class MultiStart:
     def __init__(self, driver, threshold=THRESHOLD, confirm=CONFIRM, ahead=AHEAD, flick=False,
                  seed_budget=None, max_iter=400, cpus=None, library=True, schedule=None,
                  perception=None, h_competes=False, style=None, loss_map=None, lap=None,
-                 course_prices=None):
+                 course_prices=None, b_max_iter=None, b_budget=None):
         """schedule (roadmap 061 M3b): None, M3's fixed starts ({G, D}, F with `flick`, G in a
         process of its own); else the starts chosen per re-plan by a schedule.Scheduler built
         from this dict (its keyword arguments: table, a track.SurfaceTable, default swb's;
@@ -182,7 +182,10 @@ class MultiStart:
         budget.LOSS_MAP); lap: S2's budget per lap of this length (m) on a circuit driven as
         laps (serve.py's), None per run (design 065 call 3). course_prices: S2's budget.
         CoursePrices or its path (roadmap 065 M3), the course's own corners priced offline at the
-        live settings; None, the map's only."""
+        live settings; None, the map's only. b_max_iter, b_budget: S2's B (the forced drift)
+        on its own IPOPT iteration cap and wall budget (s), roadmap 065 R6 (M4: a cap of 110 met
+        R6 on Haruna by failing B twice as often, so not the default); None, the other starts'
+        (max_iter, the seed budget). S1 never builds B, so neither touches it."""
         d = driver
         from race_planner.style import as_style
         self.style = as_style(getattr(d, "style", None) if style is None else style)
@@ -219,7 +222,7 @@ class MultiStart:
             floors = sorted({self._floor(c)[0] for c in modes.corners(d.track, d.grip)})
             if floors:
                 self.slots = self.slots + ("B",)
-        self.floors = floors
+        self.floors, self.b_max_iter = floors, b_max_iter
         kw = {"ds": d.ds, "length": d.length, "grip": d.grip, "max_iter": max_iter,
               "beta_max": getattr(d, "beta_max", None),
               "front_slip_max": getattr(d, "front_slip_max", None),
@@ -239,7 +242,12 @@ class MultiStart:
                 cpu = None if not cpus else {cpus[k % len(cpus)]}
                 args = (b, d.car, d.track, kw, cpu, held if slot == "H" else None)
                 if slot == "B":
-                    args = args + (floors,)
+                    bkw = dict(kw)
+                    if b_max_iter is not None:
+                        bkw["max_iter"] = min(int(b_max_iter), max_iter)
+                    if b_budget is not None:
+                        bkw["budget"] = float(b_budget)
+                    args = (b, d.car, d.track, bkw, cpu, None, floors)
                 p = ctx.Process(target=_worker, args=args, daemon=True)
                 p.start()
                 self.conns[slot], self.procs = a, self.procs + [p]

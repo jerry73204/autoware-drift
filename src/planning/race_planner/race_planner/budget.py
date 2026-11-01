@@ -169,13 +169,18 @@ ZONE_FROM = 30.0        # m before a corner's turn-in its zone starts (multistar
 class CoursePrices:
     """A course's own corners priced offline at the live settings (roadmap 065 M3; studies/
     mode_choice_m4.py `course-prices`): per corner (its turn-in s, m) the largest live loss over
-    the gate's window positions and the least share, or no drift at some position (None). The
+    the gate's window positions that have a drift and the least share, or None where fewer
+    than MIN_PRICED (and fewer than all) positions have one. The
     cell map's synthetic corners are flat and stand alone; a course's grade, its corners' run
     and its speeds change the price (Haruna: its downhill hairpins gain, its R 37 kink costs
     0.15-0.93 s against the map's 0.03-0.13), so where a course has been priced its own price
     is used, and the map only for corners it has none for."""
 
     TOL = 2.0               # m: a corner's turn-in matched to a priced one within this
+    # positions with a drift a corner needs to be priced (roadmap 065 M4): the gate enters a
+    # drift seen on two re-plans in a row, so two of the three approach positions are enough
+    # (packed snow R 15 x 90 had none at 105 m back, drifts at 75 and 45 m); fewer, unpriced
+    MIN_PRICED = 2
 
     def __init__(self, prices):
         self.prices = {float(k): v for k, v in prices.items()}
@@ -189,7 +194,7 @@ class CoursePrices:
             if not pos:
                 continue                    # not priced (too near the start): the map's
             pr = [p for p in pos if "loss_s" in p]
-            out[c["s_in"]] = (None if len(pr) < len(pos) else
+            out[c["s_in"]] = (None if len(pr) < min(len(pos), cls.MIN_PRICED) else
                               Price(max(p["loss_s"] for p in pr), min(p["share"] for p in pr),
                                     ("course", c["s_in"]),
                                     all(p.get("drift_from") == "B" for p in pr)))

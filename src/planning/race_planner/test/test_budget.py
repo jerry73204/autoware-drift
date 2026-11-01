@@ -129,3 +129,18 @@ def test_a_course_price_takes_the_place_of_the_maps(tmp_path):
     assert lap.priced[100.0].loss_s == pytest.approx(0.09)
     assert lap.priced[300.0] is None
     assert lap.priced[500.0] == _map().lookup("asphalt", 25.0, math.pi / 2, 8.0)
+
+
+def test_a_course_price_from_two_of_three_positions(tmp_path):
+    # roadmap 065 M4: no drift at one of three positions still prices the corner (the gate needs
+    # two re-plans in a row); at two of three, unpriced
+    import json
+    from race_planner.budget import CoursePrices
+    pos = lambda *ls: [{"d": 45.0, "loss_s": x, "share": 0.3, "drift_from": "B"}
+                       if x is not None else {"d": 45.0} for x in ls]
+    path = tmp_path / "prices.json"
+    json.dump({"corners": [{"s_in": 160.0, "positions": pos(None, 0.0368, 0.031)},
+                           {"s_in": 400.0, "positions": pos(None, None, 0.05)}]}, open(path, "w"))
+    cp = CoursePrices.load(path)
+    assert cp.lookup(160.0)[1].loss_s == pytest.approx(0.0368)
+    assert cp.lookup(400.0) == (True, None)

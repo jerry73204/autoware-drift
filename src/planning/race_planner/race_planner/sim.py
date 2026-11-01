@@ -54,11 +54,15 @@ class Plant:
     """The car on `track`. State: x, y, psi (map frame, the CoM), vx, vy, r (body), the four
     wheels' spin w (rad/s) and the steering's actual angle."""
 
-    def __init__(self, car, spec_path, track, mu_scale=1.0, transfer_scale=1.0, patches=()):
+    def __init__(self, car, spec_path, track, mu_scale=1.0, transfer_scale=1.0, patches=(),
+                 ecu_overrides=None):
+        """ecu_overrides: the ECU's calibration fields set over the spec's for this run, by
+        name (sim_vehicle_ecu's Calibration; e.g. {"esc_enabled": True}: roadmap 065 E4's
+        profiles); None, the spec's car."""
         ecu = _ecu_module()
         doc = yaml.safe_load(open(spec_path))
         self.ecu_mod = ecu
-        self.ecu = ecu.Ecu(ecu.Calibration.from_spec(doc))
+        self.ecu = ecu.Ecu(ecu.Calibration.from_spec(doc, ecu_overrides))
         self.car = replace(car, transfer_height=car.transfer_height * transfer_scale)
         self.track, self.mu_scale = track, mu_scale
         self.patches = [tuple(map(float, p)) for p in patches]

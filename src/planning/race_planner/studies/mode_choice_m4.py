@@ -194,7 +194,8 @@ def _load():
 
 def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=None, rules=None,
         sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None, style=None,
-        digest=False, jit=0.0, traj=False, prices=None):
+        digest=False, jit=0.0, traj=False, prices=None, ecu=None, ecu_obs=False,
+        force_drift=False, b_iter=None, b_budget=None):
     car = Car.from_spec(e1.SPEC)
     if sd is not None:
         import race_planner.surface as sf
@@ -211,8 +212,10 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
               "schedule": {"table": table(), "smap": smap, "always": arm == "always",
                            **({"rules": rules} if rules else {})},
               "perception": Perception(smap, seed=1000 * rep + seed) if perc and smap else None,
-              **({"course_prices": prices} if prices else {})}
-    plant = Plant(car, e1.SPEC, world)
+              **({"course_prices": prices} if prices else {}),
+              **({"b_max_iter": b_iter} if b_iter else {}),
+              **({"b_budget": b_budget} if b_budget else {})}
+    plant = Plant(car, e1.SPEC, world, ecu_overrides=ecu)
     # a car on ice has braked on it before the corner: its ECU has found the rear's grip and
     # holds regen within its share of it (issue 009), as the planner's model assumes there
     # (axle.regen_hold_car, axle.held); found here by braking on the course's start, then the
@@ -230,10 +233,13 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
                **({} if rear is None else {"rear_slip_max": None if rear <= 0 else rear}),
                **({} if rear_low is None else {"rear_slip_low": None if rear_low <= 0 else rear_low}),
                **({} if style is None else {"style": style}))
+    if force_drift:
+        _force_drift(d.multi)
     dig = _digest(d, plant) if digest else None
     rec = _Traj(d, car, world) if traj else None
     obs = _DriftObs(car, plant, world, (style.drift_past_deg if style is not None
                                         and style.name != "fastest" else 3.0))
+    eobs = _EcuObs(d, car, plant, obs, 3.0) if ecu is not None or ecu_obs else None
     s_end = (span[1] + 10.0) if span else float(planner.s[-1]) - 10.0
     load0, c0 = _load(), time.time()
     v_used = v0
@@ -284,6 +290,17 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "solve_p50": float(np.median([x["solve_s"] for x in solves])) if solves else None,
            "solve_p95": float(np.percentile([x["solve_s"] for x in solves], 95)) if solves else None,
            "solve_max": float(max([x["solve_s"] for x in solves])) if solves else None,
+           # timed runs (065 M3 left, E3): L1's wall time a re-plan, and its adoption (at
+           # max(latency, solve): live.Driver), tails and every value, for R6
+           "solve_p99": float(np.percentile([x["solve_s"] for x in solves], 99)) if solves else None,
+           "solve_all": [round(float(x["solve_s"]), 4) for x in solves],
+           "adopt_p99": (float(np.percentile([max(d.budget, x["solve_s"]) for x in solves], 99))
+                         if solves else None),
+           "slot_solve_p95": _slot_p95(recs, "solve_s"),
+           "replan_seeds": [[round(x["s0"], 1), round(x["wall"], 4),
+                             {k: [round(v["solve_s"], 4), v["iters"], v["start"]]
+                              for k, v in x["seeds"].items()}] for x in recs],
+           "slot_iters_p95": _slot_p95(recs, "iters"),
            "per_replan": (float(np.mean([len(x["slots"]) for x in recs])) if recs else 1.0),
            "g_only": (sum(1 for x in recs if x["slots"] == ["G"]) / len(recs)) if recs else 1.0,
            # a re-plan's IPOPT iterations, its slowest start's (the starts run at once): with no
@@ -305,6 +322,8 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
            "itercap": os.environ.get("RP_ITERCAP"), "jit": jit, "prices": prices,
            **obs.result(d),
+           **({} if eobs is None else eobs.result()), "ecu_overrides": ecu,
+           "force_drift": force_drift, "b_iter": b_iter, "b_budget": b_budget,
            # the car (issue 009): the plant's ECU, its regen slip control, the planner's hold
            "ecu": os.path.dirname(os.path.dirname(os.path.abspath(plant.ecu_mod.__file__))),
            "ecu_regen_slip": getattr(plant.ecu.c, "regen_slip_control", None),
@@ -384,6 +403,95 @@ class _DriftObs:
                                        mode=r.get("mode")) for r in d.multi.records
                                   if r.get("s2")]
         return out
+
+
+def _force_drift(m):
+    """E4's 'D forced' (roadmap 065): S1's gate adopts the fastest feasible drift plan whenever
+    a start has one, whatever it costs; else the gate as it is. An experiment's arm, never the
+    planner's."""
+    orig = m._choose_s1
+
+    def forced(res, rec=None):
+        rec = {} if rec is None else rec
+        dr = [k for k, r in res.items() if r["ok"] and r.get("mode") == "drift"]
+        if not dr:
+            return orig(res, rec)
+        k = min(dr, key=lambda k: res[k]["time"])
+        rec.update(mode_before=m.mode, chosen=k, mode="drift", count=0, forced=True)
+        m.mode, m.count = "drift", 0
+        return k
+    m._choose_s1 = forced
+
+
+class _EcuObs:
+    """The car's ECU against a planned slide (roadmap 065 E4): at every ECU step its traction
+    control's and ESC's motor factors, ESC's wheel brake, the regen slip control's and ABS's
+    factors; at every plant step whether the adopted plan slides there (its rear slip past the
+    planner's peak by past_deg: the plan, not the car), and the car's tracking of it. Events are
+    an intervention's starts (a factor leaving 1, a brake rising past ESC_ON), counted where the
+    plan slides. Observes only."""
+    ESC_ON = 50.0                            # N m on one wheel: an ESC brake event
+
+    def __init__(self, d, car, plant, drift, past_deg):
+        from race_planner.live import plan_at
+        self.d, self.car, self.drift, self.past = d, car, drift, math.radians(past_deg)
+        self.rows, self.acc = [], None
+        ecu, estep, pstep = plant.ecu, plant.ecu.step, plant.step
+
+        def estep_(*a, **kw):
+            out = estep(*a, **kw)
+            pt, esc = ecu.powertrain, ecu.esc.out
+            v = (getattr(getattr(pt, "tc", None), "factor", 1.0), esc.motor_factor,
+                 max(esc.brake), getattr(getattr(pt, "rsc", None), "factor", 1.0),
+                 min([m.factor for m in getattr(pt, "abs", [])] or [1.0]))
+            a_ = self.acc
+            self.acc = v if a_ is None else (min(a_[0], v[0]), min(a_[1], v[1]),
+                                             max(a_[2], v[2]), min(a_[3], v[3]), min(a_[4], v[4]))
+            return out
+
+        def pstep_(*a, **kw):
+            self.acc = None
+            st = pstep(*a, **kw)
+            p = self.d.plan
+            planned, n_err, slip_err = False, 0.0, 0.0
+            if p is not None and p["s"][0] <= st["s"] <= p["s"][-1]:
+                X, _, _ = plan_at(p, st["s"])
+                rp = abs(math.atan2(X[1] - car.lr * X[2], max(X[0], 0.1)))
+                rc = abs(math.atan2(st["vy"] - car.lr * st["r"], max(st["vx"], 0.1)))
+                planned = rp - self.drift._peak(int(st["i"]), GRIP) >= self.past
+                n_err, slip_err = abs(st["n"] - X[3]), math.degrees(rc - rp)
+            self.rows.append((st["t"], st["s"], planned, n_err, slip_err)
+                             + (self.acc or (1.0, 1.0, 0.0, 1.0, 1.0)))
+            return st
+        ecu.step, plant.step = estep_, pstep_
+
+    def result(self):
+        if len(self.rows) < 2:
+            return {"ecu_obs": None}
+        a = np.array(self.rows, float)
+        t, s, pl, n_err, slip_err, tc, escm, escb, rsc, abs_ = a.T
+        pl = pl > 0.5
+        dt = np.diff(t, prepend=t[0])
+        flags = {"tc_cut": tc < 0.999, "esc_cut": escm < 0.999, "esc_brake": escb > self.ESC_ON,
+                 "regen_cut": rsc < 0.999, "abs": abs_ < 0.999}
+        out = {"planned_s": round(float(dt[pl].sum()), 2),
+               "planned_m": round(float(np.diff(s, prepend=s[0]).clip(min=0)[pl].sum()), 1),
+               "n_err_rms_planned": (round(float(np.sqrt(np.mean(n_err[pl] ** 2))), 3)
+                                     if pl.any() else None),
+               "slip_err_mean_planned": (round(float(np.mean(slip_err[pl])), 2)
+                                         if pl.any() else None),
+               "slip_err_rms_planned": (round(float(np.sqrt(np.mean(slip_err[pl] ** 2))), 2)
+                                        if pl.any() else None),
+               "n_err_rms": round(float(np.sqrt(np.mean(n_err ** 2))), 3),
+               "tc_min_planned": round(float(tc[pl].min()), 3) if pl.any() else None,
+               "esc_brake_max_planned": round(float(escb[pl].max()), 0) if pl.any() else None}
+        for k, f in flags.items():
+            start = f & ~np.concatenate([[False], f[:-1]])
+            out[k + "_events"] = int(start.sum())
+            out[k + "_events_planned"] = int((start & pl).sum())
+            out[k + "_s"] = round(float(dt[f].sum()), 2)
+            out[k + "_s_planned"] = round(float(dt[f & pl].sum()), 2)
+        return {"ecu_obs": out}
 
 
 class _digest:
@@ -496,6 +604,15 @@ class _Traj:
                 "road": {f: np.round(np.asarray(getattr(w, f), float)[k], 3).tolist()
                          for f in ("s", "x", "y", "psi", "w_left", "w_right")},
                 "rows": self.rows, "plans": self.plans}
+
+
+def _slot_p95(recs, key):
+    """Each start's p95 of `key` over the re-plans it ran in (B's against G's, R6)."""
+    out = {}
+    for x in recs:
+        for slot, v in x["seeds"].items():
+            out.setdefault(slot, []).append(float(v[key]))
+    return {k: round(float(np.percentile(v, 95)), 4) for k, v in out.items()}
 
 
 def _adopted(recs):
@@ -1318,6 +1435,17 @@ def main():
                     help="S2: the course's own prices (course-prices' json; roadmap 065 M3)")
     ap.add_argument("--jit", type=float, default=0.0,
                     help="the start speed times (1 + jit): another draw of a chaotic run")
+    ap.add_argument("--ecu", default=None,
+                    help="the ECU's calibration over the spec's, JSON by field name (roadmap 065 "
+                         "E4, e.g. '{\"esc_enabled\": true}'); implies --ecu-obs")
+    ap.add_argument("--ecu-obs", action="store_true",
+                    help="count the ECU's interventions against the planned slides (065 E4)")
+    ap.add_argument("--force-drift", action="store_true",
+                    help="E4's 'D forced': S1's gate adopts any feasible drift plan (065 E4)")
+    ap.add_argument("--b-iter", type=int, default=None,
+                    help="S2's B on its own IPOPT iteration cap (065 R6)")
+    ap.add_argument("--b-budget", type=float, default=None,
+                    help="S2's B on its own wall budget, s (065 R6)")
     a = ap.parse_args()
     style = None
     if a.style is not None:
@@ -1346,7 +1474,9 @@ def main():
         return
     return run(a.course, a.arm, a.err, a.seed, a.perc, a.est, a.rep, cpus[1:] if cpus else None,
                json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low,
-               style, a.digest, a.jit, a.traj, a.prices)
+               style, a.digest, a.jit, a.traj, a.prices,
+               json.loads(a.ecu) if a.ecu else None, a.ecu_obs, a.force_drift,
+               a.b_iter, a.b_budget)
 
 
 if __name__ == "__main__":
