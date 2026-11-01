@@ -74,6 +74,17 @@ SCALE_X = np.array([0.2, 0.1, 0.7, 0.8, 0.3, 0.1])        # n xi vx vy r delta
 # rotation -- packed snow's R 15 and R 25 corners ran from the plans' 6 deg to 56 deg and
 # stalled or spun (docs/issues/007)
 LINE_MU = 1.0
+# ... and in full only where the surface falls off past its peak: the share of the loosening
+# runs from 1 at a sliding share of LINE_SLIDING[0] or less (packed snow 0.8, ice 0.7: issue
+# 007's weights exactly) linearly to 0 at LINE_SLIDING[1], so 0.5 where the tyre keeps its force
+# sliding (mud, loose snow: 1.0) and 0.75 on gravel (0.9). Issue 007's runaway needs a rear that
+# loses force past its peak; where it does not, a line loosened in full lets the car drift from
+# the plan until the road's edge rows take over and force the rotation at the edge (a wet-mud
+# hairpin at 6 m spun from the plan's 23 deg to 59 at its outer edge, the class-zone chain's mud
+# hairpin crossed its 8 m road), while the 0.2 m line still drives the front past its peak in a
+# tight mud hairpin and stalls it there (R 9 x 180 at 15 m); half of the loosening finishes both
+# (docs/issues/012)
+LINE_SLIDING = (0.8, 1.2)
 SCALE_RATE, SCALE_A, SCALE_JERK = 1.5, 3.0, 25.0          # rad/s; m/s^2 off the plan's; m/s^3
 TERMINAL = 10.0                 # the last node's weight: where the car is in a second counts
 EDGE_QUAD, EDGE_LIN = 1e4, 1e3  # the edge slack's cost per m^2, per m: far above tracking
@@ -452,12 +463,20 @@ class Tracker:
         m = self.half + EDGE_MARGIN
         P = np.vstack([kappa, mu, grade, sl, acc, _tyre_at(self.track, X[0, :N])])
         return np.concatenate([P.ravel(order="F"), ref.ravel(order="F"), aref, wl - m, wr - m,
-                               self._line_weights(mu)])
+                               self._line_weights(mu, sl)])
 
-    def _line_weights(self, mu):
-        """The line's residual weights at the stages' friction mu: sqrt(the stage's weight) over
-        SCALE_X[0] x max(1, LINE_MU / mu)."""
-        isn = 1.0 / (SCALE_X[0] * np.maximum(1.0, LINE_MU / mu))
+    def _line_weights(self, mu, sliding=None):
+        """The line's residual weights at the stages' friction mu and sliding share: sqrt(the
+        stage's weight) over SCALE_X[0] x (1 + f (max(1, LINE_MU / mu) - 1)), f the share of the
+        loosening the surface's fall-off allows (LINE_SLIDING: 1 at or below its first, exactly,
+        so packed snow and ice are issue 007's to the bit; 0 at or above its second)."""
+        g = np.maximum(1.0, LINE_MU / mu)
+        if sliding is not None:
+            lo, hi = LINE_SLIDING
+            f = np.where(sliding <= lo, 1.0,
+                         np.where(sliding >= hi, 0.0, (hi - sliding) / (hi - lo)))
+            g = np.where(f == 1.0, g, 1.0 + f * (g - 1.0))
+        isn = 1.0 / (SCALE_X[0] * g)
         isn[-1] *= math.sqrt(TERMINAL)
         return isn
 

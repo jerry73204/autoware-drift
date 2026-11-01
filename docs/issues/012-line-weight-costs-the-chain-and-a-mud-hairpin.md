@@ -1,8 +1,11 @@
 # 012: since L2's low-friction line weight (issue 007's fix) the zone chain stops on its snow zones and a mud hairpin spins
 
 **Severity:** high (blocks roadmap 061's gate: the true-map class-zone chain, finished by every
-multi-start run in M4c, is finished by none on 95b902e). **Status:** open (found in 061's gate
-re-score, `docs/mode-choice-m4h.md`, roadmap 061 M4h; not fixed there).
+multi-start run in M4c, is finished by none on 95b902e). **Status:** fixed (L2's loosening in
+full only where the surface falls off past its peak, `tracker.LINE_SLIDING`; see "Root cause"
+and "The fix"). Found in 061's gate re-score, `docs/mode-choice-m4h.md`, roadmap 061 M4h. The
+chain's other stops are not this issue: its ice zone (issue 013) and its packed-snow hairpin
+(M4f's mechanism, the plan's front far past its peak; below).
 
 ## What is wrong
 
@@ -67,3 +70,87 @@ RP_DET=1 RP_ITERCAP=170 .venv/bin/python studies/mode_choice_m4.py run zones --a
 ```
 and the same with `tracker.LINE_MU = 0` set before the run (study patch): see M4h's `chaindet/`
 results tagged `l0` (`line_mu` 0.0 in each result JSON).
+
+## Root cause (2026-11-01, on main 1f0725e with the car at sim_vehicle_ecu 760cd78)
+
+Every run repeatable (`RP_DET=1 RP_ITERCAP`, last-bit `--jit` draws), L2 traced every tick (its
+prediction, references, the cost's terms by kind at its solution, the free width) with the
+plant's wheels from `--traj`. Logs: swb `play_log/race_planner/mode_choice/i012/` (`trace/`,
+`base/` main, `q/` the fix, `fix/` and `fall/` earlier forms, `iso/`, `prime/`, `ecu/`, `bisect/`,
+`room/`, `digest/`).
+
+**Reproduced on main** (the planner and the car have both moved since 95b902e): `mud_wet:15:180:6`
+off the road at s 82.3 in all 5 runs (single 150/170/200, sched, always), finished with
+`LINE_MU = 0` (18.98 s). The chain (single, sched, always, 5 draws each): 1 of 15 finished; of the 11 runs that reached
+zone 1 (mud), 6 stopped there and 2 more in zone 2 (loose snow), both surfaces whose tyre keeps its force past
+the peak (sliding share 1.0).
+
+**What the line weight does on a road that keeps its force sliding.** Issue 007's runaway needs
+a rear that loses force past its peak (packed snow, sliding 0.8): L2 buys line with rotation, the
+rear falls off, the slide runs away. Where the tyre keeps its force (wet mud, loose snow: 1.0)
+rotation is a safe handle, and the loosened line (0.69 m on mud, 0.8 on loose snow) only lets
+the car drift from the plan:
+- `mud_wet:15:180:6` (6 m, the car's centre at most 1.95 m off the centre line): main and
+  `LINE_MU = 0` run tick for tick alike to s 55 (0.1 m apart); from the turn-in the loose line
+  lets the car run 1.0-1.1 m outside the plan (s 64-68: n 0.40 and 1.40 against the plan's
+  -0.65 and 0.26; with the 0.2 m line 0.69 and 0.48). At s 72 the car is at its edge (n 1.85-1.95):
+  the edge rows (1e4 a m^2) now rule, L2 cannot countersteer (that sends the car over the edge),
+  keeps 13-33 deg of steering into the turn, the front at 3-8 peaks, the slide grows from the
+  plan's 23 deg to 55 as the speed falls from 6.4 to 1.5 m/s. With the 0.2 m line the car keeps
+  0.4-0.6 m of the plan, its front also at 2-2.7 peaks at s 64, L2 countersteers (-16 deg at
+  s 75) and catches the slide (24 deg against 19).
+- The chain's mud hairpin (zone 1, R 9 x 180 at 8 m, `zones` single d170j5, stalled s 268.7):
+  the car under-rotates (25 deg falling to 1.6 against the plan's 32 to 16, s 227-240); with the
+  line at 0.69 m nothing holds the rotation (the sideslip term alone), the car crosses its 8 m
+  road from the plan's outer edge (n 2.7) to the inner one (-2.8) and stalls there, 300 fallback
+  ticks.
+
+**But the 0.2 m line is not right on these roads either.** With the loosening off on mud and
+loose snow (sliding 1.0, `LINE_SLIDING` (0.8, 1.0)), `mud_wet:9:180:15` leaves the road in every
+arm (5 of 5 runs, s 64; main finishes all): L2 steers 28-43 deg against the plan's 22-25 to hold
+0.4 m of predicted line error at its horizon's end, the front past its peak, the car slows to
+3.7 m/s against the plan's 6.3 and slides to 33 deg against 20: issue 007's loop, on mud.
+
+So the two failures are one balance: on a road that keeps its force sliding, a line loosened in
+full gives up the line until the edge decides (6 m and 8 m roads); the asphalt line drives the
+front past its peak in a tight hairpin (R 9 at 15 m). Swept (single start, mud's and loose
+snow's 24 corners, `ITERCAP` 170): the share of 007's loosening kept at sliding 1.0 of 0 and 0.25
+loses R 9 x 180 at 15 m, 0.67 and 1 (main) lose R 15 x 180 at 6 m, **0.5 finishes all 24**.
+
+**Not M4f's mechanism.** In the mud corner the front past its peak is a consequence (L2 steering
+into the turn at the edge), not the plan's: the plan steers 15-26 deg with the front at its peak.
+The chain's packed-snow hairpin (R 25 x 180 at 8 m, s 1205), where the issue suspected the two
+meet, is M4f's: the plan itself steers 41-43 deg there (its front at 7-11 peaks, slip angle 35-49
+deg against packed snow's 6) with 3.6 deg of slide, the car follows that steering within 1 deg,
+runs 1 m out of the plan and L2 reaches the lock (58 deg) with no lateral authority left
+(`trace/zq_d185.npy`). The line's weight there is issue 007's, unchanged by the fix. The same
+corner alone (`c:snow_packed:25:180:8`) finishes in every draw with any line weight (main, the
+fix, `LINE_MU = 0`; 4 draws each), as does the chain's loose-snow R 9 x 90 alone
+(`c:snow_loose:9:90:8`): on the chain they are lost to the state the car arrives in.
+
+## The fix
+
+`tracker.LINE_SLIDING = (0.8, 1.2)`: the share of issue 007's loosening kept runs from 1 at a
+sliding share of 0.8 or less (packed snow, ice: issue 007's weights to the bit) to 0 at 1.2:
+0.5 on mud and loose snow (1.0), 0.75 on gravel (0.9). Line scale 0.2 m x (1 + f (max(1,
+LINE_MU / mu) - 1)): wet mud 0.44 m (0.69 before), loose snow 0.5 (0.8), gravel 0.27 (0.29),
+packed snow 1.0 and ice 0.75 as before; asphalt 0.2 m and the constant-weight QP as before.
+Test `test_the_line_gives_way_in_full_only_where_the_surface_falls_off`; issue 007's test now on
+a road that falls off (sliding 0.8).
+
+## Result (repeatable, `RP_DET`, the car at 760cd78)
+
+| | main (1f0725e) | the fix |
+|---|---|---|
+| `mud_wet:15:180:6` | off the road at s 82.3, 5 of 5 | finished 5 of 5 (25.8-28.6 s; `LINE_MU = 0` 18.98: the car slides past the plan's, but holds) |
+| wet mud's 12 corners (single 150/170/200, sched, always at 170) | 33 / 11 / 11 | **36 / 12 / 12**; time on corners both finish +1.4 % (median +0.4 %) |
+| loose snow's 12 | 36 / 12 / 12 | 36 / 12 / 12; -0.2 to -2.0 % (median -0.1 to +0.4 %) |
+| gravel's 12 | 36 / 12 / 12 | 36 / 12 / 12; 0.0 to +0.2 % |
+| packed snow, ice | | bit for bit (plan and plant digests of `snow_packed:25:90:15`, `ice:15:180:6` equal); issue 007's corners finish |
+| Haruna, Tsukuba (`RP_DET`, single) | 76.28 s, 74.33 s | the same, digests 9524862c / 9160b94d and d7ca9f95 / 82bd3c28 |
+| the chain, true map (single, sched, always; 5 draws each) | 1 of 15 finished; zones 1-2 (mud, loose snow) stop 8 of the 11 runs reaching them | 0 of 15 finished; zones 1-3 stop **0 of 11** runs reaching them; then ice (zone 4) 7 of 11 (issue 013), loose snow R 9 x 90 3 of 4, packed hairpin 1 of 1 (M4f's) |
+
+The chain's zone 0 (asphalt declared uncertain) stops 4 of 15 runs on main and on the fix alike, the same draws (d185, d200 for sched and always, s 98.8: the plan slides 15 deg at
+16 m/s on the uncertain zone's 0.7 friction, the car on the true asphalt does not rotate and
+runs wide at the lock): the same stop on 95b902e with the old car (`bisect/`), a last-bit
+outcome (M4h saw it only in its `LINE_MU = 0` draws). Not this issue.

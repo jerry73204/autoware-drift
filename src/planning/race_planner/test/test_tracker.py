@@ -188,9 +188,12 @@ def test_the_line_weighs_less_as_the_friction_falls(car, bend_case):
     """docs/issues/007: the line's scale is SCALE_X[0] x max(1, LINE_MU / mu) at each stage's
     friction, so on packed snow (0.2) an offset costs 1/25 of asphalt's and L2 no longer buys a
     few tenths of a metre with a slide past the rear's peak; at LINE_MU or more (asphalt) the
-    weight is the 0.2 m one, and L2 the constant-weight QP itself (bit for bit as before)."""
+    weight is the 0.2 m one, and L2 the constant-weight QP itself (bit for bit as before). On
+    a road that falls off past its peak as packed snow does (sliding 0.8; issue 012)."""
+    import dataclasses
     from race_planner import tracker as T
     track, plan = bend_case
+    track = dataclasses.replace(track, sliding=np.full_like(track.s, 0.8))
     tr = Tracker(car, track)
     st = Plant(car, SPEC, track.resampled(1.0)).reset(s=0.0, n=plan["X"][3, 0],
                                                       speed=plan["X"][0, 0])
@@ -215,3 +218,28 @@ def test_the_line_weighs_less_as_the_friction_falls(car, bend_case):
     p = tr._params(X, acc, T._Plan(plan))
     H, H2 = tr.qp(w, p)[0], tr.qp_line(w, p)[0]
     assert float(H2[i, i]) == pytest.approx(float(H[i, i]), rel=1e-12)
+
+
+def test_the_line_gives_way_in_full_only_where_the_surface_falls_off(car, bend_case):
+    """docs/issues/012: issue 007's loosening applies in full where the tyre falls off past its
+    peak (sliding share 0.8 or less: packed snow, ice; exactly 007's weights), half where it
+    keeps its force (sliding 1.0: mud, loose snow), three quarters on gravel (0.9)."""
+    from race_planner import tracker as T
+    track, _ = bend_case
+    tr = Tracker(car, track)
+    N = tr.N
+    mu = np.full(N, 0.2)                          # packed snow's friction: 007's scale 1.0 m
+
+    def scale(sliding):
+        return 1.0 / tr._line_weights(mu, np.full(N, sliding))[0]
+
+    old = tr._line_weights(mu)                    # 007's (no sliding given)
+    assert np.array_equal(tr._line_weights(mu, np.full(N, 0.8)), old)
+    assert np.array_equal(tr._line_weights(mu, np.full(N, 0.7)), old)
+    assert scale(0.8) == pytest.approx(T.SCALE_X[0] * T.LINE_MU / 0.2, rel=1e-12)
+    for sliding, share in ((1.0, 0.5), (0.9, 0.75), (1.2, 0.0), (1.5, 0.0)):
+        assert scale(sliding) == pytest.approx(
+            T.SCALE_X[0] * (1.0 + share * (T.LINE_MU / 0.2 - 1.0)), rel=1e-12)
+    assert np.array_equal(tr._line_weights(mu, np.full(N, 1.2)), tr.isn)   # the constant QP
+    # on asphalt (friction at LINE_MU or more) the sliding share changes nothing
+    assert np.array_equal(tr._line_weights(np.full(N, 1.12), np.full(N, 0.8)), tr.isn)
