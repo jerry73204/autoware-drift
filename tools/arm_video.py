@@ -18,11 +18,12 @@ A run is either
 Panels are synchronised by simulated time since the planner took the car (Isaac: LIVE_FROM;
 the planner simulation: the start), stated on screen; the strip's time gap is each arm's time
 to a distance against single's to the same distance. Each panel: the road, the plan the car is
-on ahead of it (orange where the plan is in a drift mode, cyan in grip), the car's path (white,
+on ahead of it (orange where the plan's sideslip passes 5 deg, cyan below), the car's path (white,
 orange where it slid more than 5 deg), the car seen from above with its velocity against its
 heading and its tyres green to red by slip against the surface's peak (red at the peak and past
 it), and the seed of the plan (G the warm start, H held at the rear tyre's peak, D a drift
-seed, F a flick seed) and its mode (as the multistart classed the plan; single's are grip).
+seed, F a flick seed) and its mode (grip or drift as the multistart classed the plan, from its
+rear axle past the tyre's peak; single's one start is not classed).
 
 Writes <out dir>/arms.mp4 and arms.png (the paths overlaid, times, sideslip and drift share).
 """
@@ -55,6 +56,9 @@ SEED_TEXT = {"G": "G (warm start)", "H": "H (held at the peak)", "D": "D (drift 
 SLID_DEG = 5.0
 L_BOX, W_BOX = 4.8, 2.1
 _fonts = {}
+LEGEND = ("plan ahead: cyan, orange where its sideslip passes 5 deg  |  path: white, orange where "
+          "the car slid past 5 deg  |  tyres: green gripping to red at or past the surface's "
+          "peak  |  white arrow: velocity, grey line: heading")
 
 
 def font(n, kind=FONT):
@@ -128,7 +132,8 @@ class Run:
         r.pid = np.array([-1 if x["plan"] is None else x["plan"] for x in rows])
         r.stop = [x.get("stopping") for x in rows]
         for i, p in enumerate(d["plans"]):
-            r.plans[i] = (np.array(p["s"]), np.array(p["n"]), p.get("slot") or "G", p.get("mode"))
+            r.plans[i] = (np.array(p["s"]), np.array(p["n"]), p.get("slot") or "G", p.get("mode"),
+                          np.array(p["beta_deg"]))
         rd = d["road"]
         r.road = Road(rd["s"], rd["x"], rd["y"], rd["psi"], rd["w_left"], rd["w_right"])
         res = json.load(open(path.replace(".traj.json", ".json")))
@@ -159,7 +164,7 @@ class Run:
             if "plan" in x:
                 p = x["plan"]
                 r.plans[x["plan_id"]] = (np.array(p["s"]), np.array(p["n"]), x.get("slot") or "G",
-                                         x.get("mode"))
+                                         x.get("mode"), np.array(p["beta_deg"]))
         r.road = road
         rec = os.path.join(d, "record")
         sub = sorted(os.listdir(rec))[-1]
@@ -194,13 +199,13 @@ class Run:
         ds = np.where(m, np.maximum(ds, 0.0), 0.0)
         tot = max(ds.sum(), 1e-9)
         slid = float(ds[np.abs(self.beta) > SLID_DEG].sum() / tot)
-        modes = [self.plans.get(int(p), (None, None, None, None))[3] for p in self.pid]
+        modes = [self.plans.get(int(p), (None,) * 5)[3] for p in self.pid]
         known = [md is not None for md in modes]
         dr = (float(sum(d for d, md in zip(ds, modes) if md == "drift") / tot) if any(known)
               else None)
         seeds = {}
         for p, d in zip(self.pid, ds):
-            k = self.plans.get(int(p), (None, None, "G", None))[2]
+            k = self.plans.get(int(p), (None, None, "G", None, None))[2]
             seeds[k] = seeds.get(k, 0.0) + d / tot
         t0, t1 = self.time_to(s0), self.time_to(s1)
         return {"t": None if t0 is None or t1 is None else t1 - t0,
@@ -234,7 +239,7 @@ def poly(px, py):
     return list(zip(np.asarray(px).tolist(), np.asarray(py).tolist()))
 
 
-def draw_road(d, v, road, s_now, ahead=120.0, behind=70.0):
+def draw_road(d, v, road, s_now, ahead=120.0, behind=250.0):
     m = (road.s >= s_now - behind) & (road.s <= s_now + ahead)
     if m.sum() < 2:
         return
@@ -283,9 +288,10 @@ def draw_car(d, v, x, y, yaw, beta_deg, speed, slip, car_c):
 
 
 def panel(img, run, T, box, ref, scale):
-    d = ImageDraw.Draw(img)
-    x0, y0, x1, y1 = box
-    d.rectangle(box, fill=GRASS)
+    bx0, by0 = box[0], box[1]
+    sub = Image.new("RGB", (box[2] - box[0], box[3] - box[1]), GRASS)   # clipped to its box
+    d = ImageDraw.Draw(sub)
+    x0, y0, x1, y1 = box = (0, 0, sub.width - 1, sub.height - 1)
     i = run.at(T)
     v = View(box, scale)
     v.set(run.x[i], run.y[i], run.road.heading(run.s[i]))
@@ -293,12 +299,13 @@ def panel(img, run, T, box, ref, scale):
     # the plan the car is on, ahead of it
     p = run.plans.get(int(run.pid[i]))
     if p is not None:
-        ps, pn, slot, mode = p
+        ps, pn, slot, mode, pb = p
         m = ps >= run.s[i] - 2
         if m.sum() > 1:
             px, py = v.P(*run.road.xy(ps[m], pn[m]))
-            col = DRIFT_C if mode == "drift" else GRIP_C
-            d.line(poly(px, py), fill=col, width=4)
+            pts, bb = poly(px, py), np.abs(pb[m])
+            for k in range(len(pts) - 1):      # orange where the plan slides past 5 deg
+                d.line(pts[k:k + 2], fill=DRIFT_C if bb[k] > SLID_DEG else GRIP_C, width=4)
     # the car's path, the last 250 m
     j0 = max(0, int(np.searchsorted(run.s, run.s[i] - 250.0)))
     if i - j0 > 1:
@@ -312,21 +319,21 @@ def panel(img, run, T, box, ref, scale):
     # the numbers
     ended = T > run.t[-1] + 1e-6
     slot = p[2] if p else "G"
-    mode = (p[3] if p else None) or ("grip" if run.arm == "single" else "-")
-    col = DRIFT_C if mode == "drift" else GRIP_C
-    d.rectangle((x0, y0, x0 + 270, y0 + 118), fill=(0, 0, 0))
-    d.text((x0 + 10, y0 + 6), f"{run.v[i] * 3.6:5.1f} km/h", fill=FG, font=font(22, MONO))
-    d.text((x0 + 10, y0 + 34), f"sideslip {run.beta[i]:+5.1f} deg", fill=FG, font=font(18, MONO))
-    d.text((x0 + 10, y0 + 60), f"plan: {mode}", fill=col, font=font(20, BOLD))
-    d.text((x0 + 10, y0 + 88), f"seed {SEED_TEXT.get(slot, slot)}", fill=col, font=font(17))
-    d.rectangle((x1 - 230, y0, x1, y0 + 64), fill=(0, 0, 0))
-    d.text((x1 - 220, y0 + 6), f"s {run.s[i]:6.0f} m", fill=FG, font=font(18, MONO))
+    mode = (p[3] if p else None) or "not classed"
+    col = DRIFT_C if mode == "drift" else GRIP_C if mode == "grip" else DIM
+    d.rectangle((x0, y0, x0 + 236, y0 + 96), fill=(0, 0, 0))
+    d.text((x0 + 8, y0 + 4), f"{run.v[i] * 3.6:5.1f} km/h", fill=FG, font=font(19, MONO))
+    d.text((x0 + 8, y0 + 28), f"sideslip {run.beta[i]:+5.1f} deg", fill=FG, font=font(16, MONO))
+    d.text((x0 + 8, y0 + 50), f"mode: {mode}", fill=col, font=font(17, BOLD))
+    d.text((x0 + 8, y0 + 73), f"seed {SEED_TEXT.get(slot, slot)}", fill=col, font=font(15))
+    d.rectangle((x1 - 200, y0, x1, y0 + 54), fill=(0, 0, 0))
+    d.text((x1 - 192, y0 + 4), f"s {run.s[i]:6.0f} m", fill=FG, font=font(16, MONO))
     if run.arm != "single" and ref is not None:
         ta, tr = run.time_to(run.s[i]), ref.time_to(run.s[i])
         if ta is not None and tr is not None:
             g = ta - tr
-            d.text((x1 - 220, y0 + 32), f"vs single {g:+.2f} s",
-                   fill=(120, 230, 120) if g < 0 else (255, 120, 110), font=font(18, MONO))
+            d.text((x1 - 192, y0 + 28), f"vs single {g:+.2f} s",
+                   fill=(120, 230, 120) if g < 0 else (255, 120, 110), font=font(16, MONO))
     if ended:
         msg = ("FINISHED" if run.finished() else "STOPPED: " + str(run.result)) + \
             f"  at {run.t[-1]:.1f} s, s {run.s[-1]:.0f} m"
@@ -335,6 +342,7 @@ def panel(img, run, T, box, ref, scale):
         d.rectangle((cx - tw / 2 - 12, y1 - 50, cx + tw / 2 + 12, y1 - 12), fill=(0, 0, 0))
         d.text((cx - tw / 2, y1 - 46), msg,
                fill=(120, 230, 120) if run.finished() else (255, 110, 100), font=font(22, BOLD))
+    img.paste(sub, (bx0, by0))
 
 
 class Strip:
@@ -342,7 +350,7 @@ class Strip:
 
     def __init__(self, runs, s0, s1, y0):
         self.runs, self.s0, self.s1, self.y0 = runs, s0, s1, y0
-        self.boxes = [(20 + k * COL, y0 + 34, (k + 1) * COL - 14, H - 28) for k in range(3)]
+        self.boxes = [(20 + k * COL, y0 + 34, (k + 1) * COL - 14, H - 46) for k in range(3)]
         bmax = max(10.0, max(float(np.max(np.abs(r.beta))) for r in runs.values()))
         self.ranges = [(-bmax * 1.05, bmax * 1.05), (0.0, max(float(np.max(r.v)) for r in
                                                                 runs.values()) * 3.6 * 1.08)]
@@ -430,7 +438,7 @@ class Strip:
 def frame(runs, T, strip, title, sub, cam_h, scale):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    d.text((20, 8), title, fill=FG, font=font(26, BOLD))
+    d.text((20, 8), title, fill=FG, font=font(24, BOLD))
     d.text((20, 40), sub, fill=DIM, font=font(16))
     tt = f"t = {T:6.2f} s since the planner took the car (panels synced by sim time)"
     d.text((W - 20 - d.textlength(tt, font=font(16, MONO)), 40), tt, fill=FG, font=font(16, MONO))
@@ -446,13 +454,18 @@ def frame(runs, T, strip, title, sub, cam_h, scale):
             ft, fp = r.frames
             j = max(0, min(len(fp) - 1, int(np.searchsorted(ft, min(T, r.t[-1])))))
             try:
-                im = Image.open(fp[j]).convert("RGB").resize((COL - 4, cam_h), Image.BILINEAR)
+                im = Image.open(fp[j]).convert("RGB")
+                ch = int(im.width * cam_h / (COL - 4))          # the middle band, not squeezed
+                top_ = (im.height - ch) // 2
+                im = im.crop((0, top_, im.width, top_ + ch)).resize((COL - 4, cam_h),
+                                                                   Image.BILINEAR)
                 img.paste(im, (x0 + 2, y))
             except OSError:
                 pass
             y += cam_h + 2
         panel(img, r, T, (x0 + 2, y, x0 + COL - 3, bottom - 4), ref, scale)
     strip.draw(img, T)
+    d.text((20, H - 22), LEGEND, fill=DIM, font=font(14))
     return img
 
 
@@ -543,7 +556,7 @@ def main():
     print(json.dumps(stats, indent=1))
     strip = Strip(runs, s0, s1, H - STRIP_H)
     cam = any(r.frames is not None for r in runs.values())
-    cam_h = int((COL - 4) * 9 / 16) if cam else 0
+    cam_h = 300 if cam else 0
     T1 = max(r.t[-1] for r in runs.values()) + 2.0
     n = int(T1 / a.speed * a.fps)
     if a.frames:
