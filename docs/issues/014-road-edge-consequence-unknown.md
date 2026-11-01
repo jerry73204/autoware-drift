@@ -24,7 +24,7 @@ dips.
 ## What a fix needs
 
 1. **Course data**: a hazard class per side and stretch (`drop`, `barrier`, `runoff`), from
-   swb's course builder, which already places the guardrails (`course/usd.py`).
+   swb's course builder, which already places the guardrails (`course/props.py`).
 2. **Planner**: a margin per class (wider, or a hard row, beside a drop); no planned slide
    (S2, S3) in a corner beside a drop, or a smaller grip share there.
 3. **Plant and scoring**: leaving onto a drop is a crash, onto a run-off a recoverable stop,
