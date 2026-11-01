@@ -18,7 +18,9 @@ Courses:
 - `c:<class>:<R>:<turn deg>:<width m>`: one corner of the drift study's geometry (60 m entry
   straight, 8 m ramps, the exit straight), the whole road one swb class;
 - `zones`: M3b's class-zone chain (E1's ten corners, each in a zone of a class, one uncertain);
-- `haruna`, `tsukuba`: swb's courses, dry, one lap.
+- `haruna`, `tsukuba`: swb's courses, dry, one lap;
+- `<course>@<class>`: haruna, tsukuba or zones (E1's ten-corner chain) with the whole road one
+  swb class, e.g. `haruna@snow_packed` (a class the table does not have is refused by name).
 
 The oracle (`oracle <course>`): the corner's best-of-starts plan offline at the loop's settings
 (grip 0.92, ds 4, from the loop's start state), tightly solved: free from cold, from H's result,
@@ -27,7 +29,9 @@ Its drift gain (held - best) is the ceiling a loop can keep.
 
 Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> --arm sched
           [--err 10 --seed 1 --perc --est --rep 1 --cpus 8,9,10,11]
-          [--style <style.yaml or JSON>] [--digest] [--jit 1e-9]
+          [--style <style.yaml or JSON>] [--digest] [--jit 1e-9] [--traj]
+      --traj: the run tick by tick as well, <key>.traj.json (the car, each wheel's slip against
+      its peak, every adopted plan with its seed and mode, the road), for tools/arm_video.py;
       --style: the driving style record (roadmap 065; live.Driver's style), none by default;
       --digest: a sha256 of every plan the driver made (X, U, s, t) and of the plant's states,
       for bit-for-bit comparisons (roadmap 065 E1). With RP_DET=1 in the environment the solvers
@@ -125,6 +129,24 @@ def course(name, car, err=0, seed=0):
     None, corner info). The planner's track is smap.planner_track(base), the plant's
     smap.true_track(base)."""
     tab = table()
+    if "@" in name:                      # a course with its whole road one class
+        where, cls = name.split("@", 1)
+        if cls not in tab.mu_of:
+            raise ValueError(f"course {name!r}: unknown surface class {cls!r} (the table's: "
+                             f"{', '.join(tab.mu_of)})")
+        if where in ("haruna", "tsukuba"):
+            t = Track.from_swb_course(os.path.join(SWB, "data/courses", where), tab, car)
+            if t.closed:
+                t = t.unrolled(1)
+            base = t.resampled(1.0)
+        elif where == "zones":
+            base = e1.chain(1.0)
+        else:
+            raise ValueError(f"course {name!r}: no course {where!r} to put {cls!r} on "
+                             "(haruna, tsukuba, zones)")
+        zones, pick = misdeclare([Zone(0.0, 1e5, cls)], err, seed)
+        return base, SurfaceMap(tab, car, zones), 10.0, 12.0, None, {"class": cls,
+                                                                     "wrong": pick}
     if name in ("haruna", "tsukuba"):
         t = Track.from_swb_course(os.path.join(SWB, "data/courses", name), tab, car)
         if t.closed:
@@ -167,7 +189,7 @@ def _load():
 
 def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=None, rules=None,
         sd=None, tag="", beta_max=None, front=None, rear=None, rear_low=None, style=None,
-        digest=False, jit=0.0):
+        digest=False, jit=0.0, traj=False):
     car = Car.from_spec(e1.SPEC)
     if sd is not None:
         import race_planner.surface as sf
@@ -194,6 +216,7 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
                **({} if rear_low is None else {"rear_slip_low": None if rear_low <= 0 else rear_low}),
                **({} if style is None else {"style": style}))
     dig = _digest(d, plant) if digest else None
+    rec = _Traj(d, car, world) if traj else None
     s_end = (span[1] + 10.0) if span else float(planner.s[-1]) - 10.0
     load0, c0 = _load(), time.time()
     v_used = v0
@@ -263,6 +286,10 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
     key = run_key(name, arm, err, seed, perc, est, rep, tag)
     with open(os.path.join(OUT, key + ".json"), "w") as fh:
         json.dump(res, fh, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    if rec is not None:
+        with open(os.path.join(OUT, key + ".traj.json"), "w") as fh:
+            json.dump(dict(rec.result(), run=key, course=name, arm=arm), fh,
+                      default=lambda o: o.item() if hasattr(o, "item") else str(o))
     print(key, res["result"], res["t_timed"] or res["t_course"], "wall", round(wall),
           "load", load0, flush=True)
     return res
@@ -310,6 +337,74 @@ class _digest:
     def result(self):
         return {"plans_digest": self.plans.hexdigest(), "traj_digest": self.traj.hexdigest(),
                 "n_plans": len(self.each), "plan_hashes": self.each}
+
+
+class _Traj:
+    """--traj: the run tick by tick, for a video (tools/arm_video.py): the car (x, y, yaw of the
+    CoM, speed, sideslip, steering), each wheel's slip against its tyre's peak (model.tyre's
+    combined slip over the surface's peak, 1 at the peak: fl, fr, rl, rr), the plan the car is
+    on (an index into `plans`: each adopted plan's s, n, sideslip, speed, its seed G/H/D/F and
+    mode) and the road (the world's centreline and edges). Reads only: the run is the same
+    with it or without (its digests too)."""
+
+    def __init__(self, d, car, world):
+        import casadi as ca
+        from race_planner import model
+        xs, us, acc = ca.SX.sym("x", 3), ca.SX.sym("u", 5), ca.SX.sym("acc", 2)
+        sf = ca.SX.sym("surface", 4)
+        o = model.dynamics(car, [xs[0], xs[1], xs[2]], [us[i] for i in range(5)], 1.0,
+                           [acc[0], acc[1]], 1.0, sf)
+        self.f = ca.Function("slip", [xs, us, acc, sf],
+                             [ca.vertcat(*o["kappa"]), ca.vertcat(*o["alpha"])])
+        self.kp, self.tp = model.peaks(car)
+        self.car, self.world, self.d = car, world, d
+        from race_planner.serve import PlanIds
+        self.rows, self.plans, self.ids = [], [], PlanIds()
+        from race_planner.track import TYRE_FIELDS
+        self.tyre = np.vstack([getattr(world, k) for k in TYRE_FIELDS])
+        step = d.step
+
+        def step_(state):
+            cmd = step(state)
+            self.add(state)
+            return cmd
+        d.step = step_
+
+    def add(self, st):
+        R = self.car.r_wheel
+        i = int(st["i"])
+        sf = self.tyre[:, i]
+        u = [st["delta"]] + list(np.asarray(st["w"], float) * R)
+        kap, alp = (np.asarray(q, float).ravel() for q in
+                    self.f([st["vx"], st["vy"], st["r"]], u, [st["ax"], st["ay"]], sf))
+        rho = np.hypot(kap / (self.kp * sf[2]), alp / (self.tp * sf[3]))
+        from race_planner.serve import plan_message
+        pm = plan_message(self.d, self.ids)
+        if "plan" in pm:
+            self.plans.append(dict(pm["plan"], t=round(st["t"], 3), slot=pm["slot"],
+                                   mode=pm["mode"]))
+        j = pm["plan_id"]
+        self.rows.append({"t": round(st["t"], 3), "s": round(st["s"], 2), "n": round(st["n"], 3),
+                          "x": round(st["x"], 3), "y": round(st["y"], 3),
+                          "yaw": round(st["psi"], 4),
+                          "v": round(math.hypot(st["vx"], st["vy"]), 3),
+                          "beta_deg": round(math.degrees(math.atan2(st["vy"],
+                                                                    max(st["vx"], 0.5))), 2),
+                          "delta_deg": round(math.degrees(st["delta"]), 2),
+                          "slip": np.round(rho, 3).tolist(),
+                          "kappa": np.round(kap, 4).tolist(),
+                          "alpha_deg": np.round(np.degrees(np.arctan(alp)), 2).tolist(),
+                          "plan": j, "stopping": self.d.stopping})
+
+    def result(self):
+        w = self.world
+        k = slice(None, None, 2)
+        return {"wheels": "fl fr rl rr", "car": {"lf": self.car.lf, "lr": self.car.lr,
+                                                "track": self.car.track,
+                                                "width": self.car.width},
+                "road": {f: np.round(np.asarray(getattr(w, f), float)[k], 3).tolist()
+                         for f in ("s", "x", "y", "psi", "w_left", "w_right")},
+                "rows": self.rows, "plans": self.plans}
 
 
 def _adopted(recs):
@@ -880,6 +975,9 @@ def main():
                     help="the driving style record (roadmap 065): a YAML path or JSON")
     ap.add_argument("--digest", action="store_true",
                     help="hash every plan and plant state (bit-for-bit comparisons)")
+    ap.add_argument("--traj", action="store_true",
+                    help="also write the run tick by tick (<key>.traj.json: the car, each "
+                         "wheel's slip against its peak, every adopted plan, the road)")
     ap.add_argument("--jit", type=float, default=0.0,
                     help="the start speed times (1 + jit): another draw of a chaotic run")
     a = ap.parse_args()
@@ -902,7 +1000,7 @@ def main():
         return
     return run(a.course, a.arm, a.err, a.seed, a.perc, a.est, a.rep, cpus[1:] if cpus else None,
                json.loads(a.rules) if a.rules else None, a.sd, a.tag, a.beta, a.front, a.rear, a.rear_low,
-               style, a.digest, a.jit)
+               style, a.digest, a.jit, a.traj)
 
 
 if __name__ == "__main__":

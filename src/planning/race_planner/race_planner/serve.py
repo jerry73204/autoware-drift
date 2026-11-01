@@ -13,8 +13,11 @@ First line in: {"init": {"map_dir": ..., "spec": ..., "classes": ..., "l0": <npz
   out: {"ready": true, "s0": <the track's first s>, "style": <its name>}
 Then per tick in: {"state": {"t", "x", "y", "yaw", "vx", "vy", "r", "delta"}} (map frame, the
   CoM; vx, vy in the body frame; yaw the body's)
-  out: {"accel", "tire_angle", "ok", "fallback", "replan", "stop", "s", "n", "xi", "solve_s"}
-  ("stop": why the car is being braked to a stop, or null)
+  out: {"accel", "tire_angle", "ok", "fallback", "replan", "stop", "s", "n", "xi", "solve_s",
+  "slot", "mode", "plan_id"} ("stop": why the car is being braked to a stop, or null; slot: the
+  start the plan the car is on came from, G/H/D/F, G with one start; mode: grip or drift as the
+  multistart classed it, null with one start; plan_id: that plan's number, 0 the first), and
+  on the tick a plan is adopted "plan": {"s", "n", "beta_deg", "v"} (plan_message)
 A style change at any time: {"style": {...}} (as init's), validated as at init and applied at
   the next re-plan, not within 25 m of a committed drift (live.Driver.set_style, style_due)
   out: {"style": <name>, "pending": true}, or {"style_error": <why>} with the style kept
@@ -72,6 +75,34 @@ def style_message(driver, record, t=None):
     return {"style": st.name, "pending": True}
 
 
+class PlanIds:
+    """Numbers the plans the driver adopts, for plan_message."""
+
+    def __init__(self):
+        self.ids, self.keep = {}, []
+
+
+def plan_message(driver, ids):
+    """The plan the driver is on: its seed (slot), mode and number, and the plan itself the
+    first time it is seen (s, n, sideslip in deg, speed at its nodes)."""
+    p = driver.plan
+    if p is None:
+        return {"slot": None, "mode": None, "plan_id": None}
+    out = {"slot": p.get("slot", "G"), "mode": p.get("mode")}
+    k = id(p)
+    if k not in ids.ids:
+        ids.ids[k] = len(ids.keep)
+        ids.keep.append(p)                     # held, so no later plan reuses its id
+        X = np.asarray(p["X"], float)
+        out["plan"] = {"s": np.round(np.asarray(p["s"], float), 2).tolist(),
+                       "n": np.round(X[3], 3).tolist(),
+                       "beta_deg": np.round(np.degrees(np.arctan2(X[1], np.maximum(X[0], 0.5))),
+                                            2).tolist(),
+                       "v": np.round(np.hypot(X[0], X[1]), 2).tolist()}
+    out["plan_id"] = ids.ids[k]
+    return out
+
+
 def main():
     from race_planner import live
     from race_planner.tracker import Tracker
@@ -97,7 +128,7 @@ def main():
                          multistart=init.get("multistart"), style=style)
     frenet = Frenet(track, None if lap is None else int(lap / float(track.s[1] - track.s[0])))
     _out({"ready": True, "s0": float(track.s[0]), "style": driver.style.name})
-    started = False
+    started, ids = False, PlanIds()
     for line in sys.stdin:
         msg = json.loads(line)
         if msg.get("stop"):
@@ -119,7 +150,8 @@ def main():
               "fallback": cmd.get("fallback", False), "replan": last["replan"], "s": s, "n": n,
               "xi": xi, "n_plan": last["n_plan"], "v_plan": last["v_plan"], "stop": last["stopping"],
               "beta_plan_deg": last["beta_plan_deg"],
-              "solve_s": driver.solves[-1]["solve_s"] if driver.solves else 0.0})
+              "solve_s": driver.solves[-1]["solve_s"] if driver.solves else 0.0,
+              **plan_message(driver, ids)})
     driver.close()
     summary = {"solves": len(driver.solves), "solves_ok": sum(x["ok"] for x in driver.solves),
                "style": driver.style.name, "style_log": driver.style_log}
