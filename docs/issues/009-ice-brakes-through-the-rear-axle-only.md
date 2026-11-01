@@ -2,8 +2,9 @@
 
 **Severity:** high on ice's 6 m roads (R 9 x 180 and R 15 x 180 at 6 m lost in every M4e run
 with issue 008's rows; the 6 m roads hold 44 of the 49 corners ice lost in M4e).
-**Status:** open. The cause is the car (its ECU's braking on its spec), not the planner; a fix
-needs a ruling (roadmap 061 M4f, `docs/mode-choice-m4f.md`).
+**Status:** fixed in the car (user's ruling: option 1), roadmap 061 M4g
+(`docs/mode-choice-m4g.md`): sim_vehicle_ecu's regen slip control, the planner's axle model
+following it, L2's front wheels held tighter where it applies. See "The fix".
 
 ## What is wrong
 
@@ -90,7 +91,56 @@ A car change (sim_vehicle_ecu, the spec): not the planner's to make.
   Right in principle (a plan whose own car leaves the road is not a plan), no gain: not
   shipped.
 
-## For a fix (ruling)
+## The fix (M4g)
+
+**The car** (sim_vehicle_ecu `ev`, as a real EV's brake module blends regen; README "Regen
+slip control"; all from the module's own estimates):
+- the regen beyond the driven axle's share of the brakes (by the brake distribution) is cut
+  while a driven wheel slips (the ABS/TC modulator on the motor's torque); the friction brakes
+  take what it gives up. Released past 0.25 slip, or on a runaway wheel: past 0.06, slowing
+  3 g faster than the car, its axle carrying 30 % less than the brakes put on it (each alone
+  fires on dry asphalt; together they did not on Haruna or Tsukuba). Regen within the axle's
+  own share is left: cutting it hands it to the same axle's friction brakes;
+- in such a slip event the axle's grip is measured from the wheels' own balance (brake torque
+  and drag less what their inertia gives up; the car's deceleration lagged the tyre and once
+  read 0) and kept (its highest in the event; forgotten at 0.001 /s, never below what the axle
+  carries unslipping); regen beyond the axle's share is then held within 0.7 of that grip.
+On ice a request of -1.8 m/s^2 now finds 0.227-0.243 (ice's peak 0.265) within 0.1 s and the
+rear rolls (slip within 0.02); before, the rear turned backwards. **ABS stays off** in the spec:
+not needed (the rear's own share at the static 50:50 split is within its grip below ~2.1 m/s^2,
+and the planner keeps its tyres on their rising branch).
+
+**The planner**: `axle.dynamics` holds regen within `car.regen_grip_share` (0.7) of the rear's
+grip at the planned friction, smoothly (`_smin`), where the road is `held`: slick enough for the
+motor's full regen to slip the rear (`axle.regen_slip_mu`, 0.42 on drift_mustang) and falling
+off past its peak as ice does (sliding at most 0.75). So rear = max(min(regen, 0.7 mu Fz_r),
+(1 - share) B), front = B - rear. Where no node is held (`axle.regen_hold_car`, live.Driver and
+the trackers) the model is the old one expression for expression: Haruna and Tsukuba `RP_DET`
+digests equal to M4e's. Not on snow or mud: there the hold's plans used the fronts in a
+braking drift that left the 6 m roads (packed snow 28 of 36, loose 24, against 36 each), and
+the old plans brake the rear within its grip, where the car does not need the hold. L2's front
+wheels' proximal term is 0.3 m/s (1.0 elsewhere) where the hold applies: their brakes then
+work on ice at a front past its 3 deg lateral peak, where the balance is flat in the wheel's
+speed (W_PROX 1.0: the predicted front speed swung 5-10 m/s tick to tick, HPIPM failed every
+other tick, the LQR's +0.5 m/s^2 drive in between; 15 m roads lost).
+
+**The study**: a car on ice has braked on it before the corner, so its ECU knows the
+rear's grip (`sim.Plant.regen_grip_found`: braking at -1.8 m/s^2 for 0.6 s on the course's
+start; result JSON `ecu_primed`). Without it the corner's first braking was the car's probe
+while the plan already assumed the hold: 4 of 12 ice corners (M4e 8) at 150 iterations.
+
+**The crude cap's 15 m losses (M4f)**: its model's hard `ca.fmin(regen, cap)`. L2's RTI
+linearises at the kink and HPIPM stopped at its minimum step (status 2) every other tick: 136,
+97, 33 and 340 LQR ticks in the four lost runs (0-3 in M4e's); with a smooth min the same four
+finished, failures 0-17.
+
+**Measured** (M4g, repeatable runs, M4e's 20 / 10 replicates; `docs/mode-choice-m4g.md`): ice
+single 10.90 of 12 against 9.55 (+1.35, 6.1 se), sched 10.30 against 9.80 (+0.50, 1.5 se); the
+6 m roads 108 against 76 of 120 (single), L2's losses gone; R 9 x 180 at 6 m 8 of 20 (0 before);
+R 9 x 180 at 15 m worse (10 of 20 against 17, L1 at the hairpin's entry, now hotter). Haruna and
+Tsukuba bit for bit; packed and loose snow and mud finished as before.
+
+## For a fix (ruling, M4f)
 
 - **The car**: regen limited by what the driven axle can carry (the ECU's friction estimate, or
   ABS working the motor's torque as it does the brakes), and `axle.brakes` given the same rule.
