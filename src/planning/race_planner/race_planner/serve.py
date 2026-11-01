@@ -121,11 +121,14 @@ def main():
             l0 = {"s": np.concatenate([l0["s"] + k * lap for k in range(laps + 1)]),
                   "speed": np.tile(l0["speed"], laps + 1)}
     track = track.resampled(float(init.get("ds", 4.0)))
+    ms = init.get("multistart")
+    if ms is not None and lap is not None and style.name == "drift_budget":
+        ms = dict(ms, lap=lap)        # S2's budget a lap (roadmap 065 call 3)
     driver = live.Driver(car, track, Tracker(car, track), l0=l0,
                          ds=float(init.get("ds", 4.0)), length=float(init.get("length", 200.0)),
                          grip=float(init.get("grip", 0.92)), budget=float(init.get("budget", 1.0)),
                          use_estimate=bool(init.get("friction_estimate", False)),
-                         multistart=init.get("multistart"), style=style)
+                         multistart=ms, style=style)
     frenet = Frenet(track, None if lap is None else int(lap / float(track.s[1] - track.s[0])))
     _out({"ready": True, "s0": float(track.s[0]), "style": driver.style.name})
     started, ids = False, PlanIds()

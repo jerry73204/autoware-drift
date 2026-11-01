@@ -43,7 +43,7 @@ Run:  env -u PYTHONPATH .venv/bin/python studies/mode_choice_m4.py run <course> 
       --jit: the start speed times (1 + jit), a last-bit start: ice's corners are chaotic (an
       outcome flips with the last bit), so a repeatable run is one draw, and --jit 1e-9, 2e-9 ...
       draw others (every run's plant digest differs; name each with --tag; M4e).
-      ... oracle <course>;  ... report
+      ... oracle <course>;  ... report;  ... pareto <course>[,<course>...] (065 M2, E2)
 Results: swb's play_log/race_planner/mode_choice/m4/.
 """
 import argparse
@@ -217,6 +217,8 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
                **({} if style is None else {"style": style}))
     dig = _digest(d, plant) if digest else None
     rec = _Traj(d, car, world) if traj else None
+    obs = _DriftObs(car, plant, world, (style.drift_past_deg if style is not None
+                                        and style.name != "fastest" else 3.0))
     s_end = (span[1] + 10.0) if span else float(planner.s[-1]) - 10.0
     load0, c0 = _load(), time.time()
     v_used = v0
@@ -281,6 +283,7 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
            "style": None if style is None else getattr(d, "style", None).to_dict(),
            "det": os.environ.get("RP_DET") == "1", "rp_root": os.environ.get("RP_ROOT"),
            "itercap": os.environ.get("RP_ITERCAP"), "jit": jit,
+           **obs.result(d),
            **({} if dig is None else dig.result())}
     os.makedirs(OUT, exist_ok=True)
     key = run_key(name, arm, err, seed, perc, est, rep, tag)
@@ -293,6 +296,60 @@ def run(name, arm="single", err=0, seed=0, perc=False, est=False, rep=1, cpus=No
     print(key, res["result"], res["t_timed"] or res["t_course"], "wall", round(wall),
           "load", load0, flush=True)
     return res
+
+
+class _DriftObs:
+    """The plant's drift (roadmap 065 M2): at every plant step the rear axle's slip angle
+    against its tyre's peak on the true surface there (modes.rear_peak at the world's friction);
+    the metres driven past_deg or more past it, in all and per corner of the planner's map.
+    Observes only (the plant's states are read, never changed)."""
+
+    def __init__(self, car, plant, world, past_deg):
+        self.car, self.world, self.past = car, world, math.radians(past_deg)
+        self.rows, self._pk = [], {}
+        step = plant.step
+
+        def step_(*a, **kw):
+            st = step(*a, **kw)
+            self.rows.append((st["s"], st["vx"], st["vy"], st["r"], st["i"]))
+            return st
+        plant.step = step_
+
+    def _peak(self, i):
+        if i not in self._pk:
+            from race_planner.track import TYRE_FIELDS
+            w = self.world
+            self._pk[i] = modes.rear_peak(self.car, float(w.mu[i]), float(w.sliding[i]),
+                                          tuple(float(getattr(w, k)[i]) for k in TYRE_FIELDS))
+        return self._pk[i]
+
+    def result(self, d):
+        if len(self.rows) < 2:
+            return {"plant_drift_m": 0.0, "plant_drift_share": 0.0}
+        a = np.array(self.rows)
+        s, vx, vy, r, i = a.T
+        past = np.abs(np.arctan2(vy - self.car.lr * r, np.maximum(vx, 0.1))) - np.array(
+            [self._peak(int(k)) for k in i])
+        ds = np.diff(s, prepend=s[0]).clip(min=0.0)
+        on = past >= self.past
+        out = {"plant_drift_m": round(float(ds[on].sum()), 1),
+               "plant_drift_share": round(float(ds[on].sum() / max(ds.sum(), 1e-9)), 4),
+               "plant_past_max_deg": round(float(np.degrees(past.max())), 2)}
+        if d.multi is not None:
+            per = {}
+            for c in d.multi.corners:
+                z = (s >= c.s_in - 30.0) & (s <= c.s_out)
+                if z.any():
+                    per[round(c.s_in, 1)] = round(float(ds[z & on].sum()), 1)
+            out["plant_drift_corners"] = per
+            lap = getattr(d.multi, "s2", None)
+            if lap is not None:
+                out["s2"] = dict(lap.summary(), spent=round(lap.account.spent, 4),
+                                 debits=lap.account.debits)
+                out["s2_gate"] = [dict(r["s2"], s0=round(r["s0"], 1), chosen=r.get("chosen"),
+                                       mode=r.get("mode")) for r in d.multi.records
+                                  if r.get("s2")]
+        return out
 
 
 class _digest:
@@ -939,6 +996,128 @@ def aggregate():
     print(text)
 
 
+# ---- S2 offline: the lap-time-against-drift curve from the signed map (roadmap 065 M2, E2) ----
+
+S2_OUT = os.path.join(SWB, "play_log/race_planner/style/m2")
+BUDGETS_S = (0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
+EPS_PCT = (0.3, 1.0, 2.0, 3.0)
+S1_LAP = {"haruna": 76.28, "tsukuba": 74.33}     # S1's det laps on 95b902e (065 E1)
+
+
+def pareto(names):
+    """For each course: its corners priced from race_planner/drift_losses.json as S2 prices them
+    (multistart.s2_classes, budget.S2Lap), and for each budget (BUDGETS_S seconds, and EPS_PCT %
+    of the lap: S1's measured lap where known, else the quasi-steady lap of L0's speed profile on
+    the planner's line) what the knapsack buys: the predicted loss (s, % of the lap), the drift
+    metres and their share of the course, the corners bought, the corners where the drift gains
+    (free), priced, with no drift valley, unpriced. S2_OUT/pareto.json and pareto.md."""
+    from race_planner.budget import ZONE_FROM, LossMap, S2Lap
+    from race_planner.line import min_curvature_line
+    from race_planner.multistart import s2_classes
+    from race_planner.qss import speed_profile
+    from race_planner.schedule import Scheduler
+    from race_planner.style import Style
+    lm = LossMap.load()
+    car = Car.from_spec(e1.SPEC)
+    out, md = [], ["# 065 M2 (E2): what S2's budget buys, predicted from the signed map", ""]
+    for name in names:
+        planner, world, smap, s0, v0, span, info = tracks(name, car)
+        sch = Scheduler(planner, car, table(), smap=smap, grip=GRIP)
+        classes, flat = s2_classes(sch, planner)
+        cs = sch.corners
+        length = float(planner.s[-1] - planner.s[0])
+        line, _ = min_curvature_line(planner, 0.5 * car.width, 0.3)
+        v = np.maximum(speed_profile(line, car), 1.0)
+        t_qss = float(np.sum(np.diff(planner.s) / (0.5 * (v[1:] + v[:-1]))))
+        t_ref = S1_LAP.get(name, t_qss)
+        zone = {c.s_in: c.s_out - c.s_in + ZONE_FROM for c in cs}
+        base = S2Lap.build(Style(name="drift_budget"), cs, classes, lm, flat)
+        pr = base.priced
+        corners = [{"s_in": round(c.s_in, 1), "R": round(c.R, 1),
+                    "turn": round(math.degrees(c.turn)), "classes": classes(c)[0],
+                    "width": round(classes(c)[1], 1),
+                    "loss_s": None if pr[c.s_in] is None else round(pr[c.s_in].loss_s, 4),
+                    "share": None if pr[c.s_in] is None else pr[c.s_in].share} for c in cs]
+        md += [f"## {name}", "",
+               f"{len(cs)} corners, {length:.0f} m; reference lap {t_ref:.2f} s "
+               f"({'S1, measured' if name in S1_LAP else 'quasi-steady, L0'}); priced "
+               f"{sum(p is not None for p in pr.values())}, of which the drift gains in "
+               f"{sum(p is not None and p.loss_s <= 0 for p in pr.values())}", "",
+               "| budget | s | predicted loss s | % of lap | drift m | share of course | "
+               "corners bought |", "|---|---|---|---|---|---|---|"]
+        rows = []
+        budgets = [(f"{b:g} s", b) for b in BUDGETS_S] + [
+            (f"{e:g} %", e / 100.0 * t_ref) for e in EPS_PCT]
+        for label, b in budgets:
+            lap = S2Lap.build(Style(name="drift_budget", eps_lap_s=round(b, 4)), cs, classes, lm,
+                              flat)
+            loss = sum(max(0.0, p.loss_s) for p in lap.committed.values())
+            dm = sum(p.share * zone[k] for k, p in lap.committed.items())
+            rows.append({"budget": label, "eps_lap_s": round(b, 4), "loss_s": round(loss, 4),
+                         "loss_pct": round(100 * loss / t_ref, 3), "drift_m": round(dm, 1),
+                         "share": round(dm / length, 4),
+                         "bought": sorted(round(k, 1) for k in lap.committed)})
+            md.append(f"| {label} | {b:.3f} | {loss:.3f} | {100 * loss / t_ref:.2f} | {dm:.0f} | "
+                      f"{100 * dm / length:.1f} % | {len(lap.committed)} |")
+        md += [""]
+        out.append({"course": name, "length": length, "t_ref": t_ref, "t_qss": t_qss,
+                    "corners": corners, "rows": rows})
+    os.makedirs(S2_OUT, exist_ok=True)
+    json.dump(out, open(os.path.join(S2_OUT, "pareto.json"), "w"), indent=1)
+    open(os.path.join(S2_OUT, "pareto.md"), "w").write("\n".join(md) + "\n")
+    print("\n".join(md))
+
+
+def s2_report(d=None):
+    """E3's table (065 M2): every S2 run under d (default S2_OUT/e3) against its course's S1
+    run (tag s1): result, time, the loss against S1 and the budget, the plant's drift (metres
+    3 deg past the peak, share), mode changes, solves a re-plan, and per bought corner the
+    live gate's last measured loss against its allowance (price + 0.3 %). S2_OUT/e3.md."""
+    d = d or os.path.join(S2_OUT, "e3")
+    rs = [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d)) if f.endswith(".json")]
+    s1 = {r["course"]: r for r in rs if r["tag"] == "s1"}
+    lines = ["# 065 M2 (E3): S2 against S1 in closed loop (sim.Plant, RP_DET)", "",
+             "| course | style | budget s | result | time s | vs S1 s | within budget + 0.3 % |"
+             " plant drift m (share) | mode changes | solves / re-plan | bought | spent s |",
+             "|" + "---|" * 12]
+    t = lambda r: r["t_timed"] if r["t_timed"] is not None else r["t_course"]
+    for r in sorted(rs, key=lambda r: (r["course"], r["tag"] != "s1", r["tag"])):
+        st = r.get("style") or {}
+        b = st.get("eps_lap_s", 0.0) if st.get("name") == "drift_budget" else None
+        base = s1.get(r["course"])
+        dt = (t(r) - t(base)) if base and t(r) is not None and t(base) is not None else None
+        ok = None if dt is None or b is None else dt <= b + 0.003 * t(base) + 1e-9
+        s2 = r.get("s2") or {}
+        lines.append(
+            f"| {r['course']} | {r['tag']} | {'' if b is None else b} | {r['result']} | "
+            f"{'' if t(r) is None else f'{t(r):.2f}'} | {'' if dt is None else f'{dt:+.2f}'} | "
+            f"{'' if ok is None else ('yes' if ok else '**no**')} | "
+            f"{r.get('plant_drift_m', 0):.0f} ({100 * r.get('plant_drift_share', 0):.1f} %) | "
+            f"{len(r['mode_changes'])} | {r['per_replan']:.2f} | "
+            f"{len(s2.get('committed', {})) if s2 else ''} | {s2.get('spent', '') if s2 else ''} |")
+    lines += ["", "## Bought corners: the live gate's loss against the allowance", "",
+              "| course | style | corner s_in | price s | allow s | live loss s, last | entered |",
+              "|---|---|---|---|---|---|---|"]
+    for r in rs:
+        if not r.get("s2"):
+            continue
+        last = {}
+        for g in r.get("s2_gate", []):
+            if g["kind"] == "budget":
+                last[g["corner"]] = g
+        com = r["s2"]["committed"]
+        entered = {round(x["key"], 1) for x in r["s2"]["debits"]}
+        for c, g in sorted(last.items()):
+            pr = com.get(str(round(c, 1)), com.get(round(c, 1)))
+            lv = g.get("loss")
+            lines.append(f"| {r['course']} | {r['tag']} | {c:.1f} | {pr} | {g['allow']:.3f} | "
+                         f"{'none' if lv is None else f'{lv:+.3f}'} | "
+                         f"{'yes' if round(c, 1) in entered else 'no'} |")
+    text = "\n".join(lines) + "\n"
+    open(os.path.join(S2_OUT, "e3.md"), "w").write(text)
+    print(text)
+
+
 def corner_courses(widths=(6.0, 15.0)):
     out = []
     for cls in CLASSES:
@@ -995,6 +1174,10 @@ def main():
         return report()
     if a.what == "aggregate":
         return aggregate()
+    if a.what == "s2-report":
+        return s2_report()
+    if a.what == "pareto":
+        return pareto(a.course.split(","))
     if a.what == "list":
         print("\n".join(corner_courses()))
         return

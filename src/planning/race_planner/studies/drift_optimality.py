@@ -1068,6 +1068,269 @@ def width_report():
         f.write(text + "\n")
 
 
+
+# ---- S2's signed map: what a drift costs where it does not pay (roadmap 065 M2, E2) ----
+#
+# The drift map (drift-map, 061 M3b) holds the cells where a drift pays. S2 (drift_budget)
+# spends a lap budget on drifts that cost a little, so it needs the other cells too: per cell
+# (class, R, turn, width) the best drift plan's time against the best grip plan's, signed (a
+# gain negative). A "forced" drift is the free window solved from the drift seeds the live
+# planner sends (Ds, F into a hairpin), from the grip plan and from cold, with the live slip caps
+# (front 1, rear 3 x the peak on a class without fall-off; design 065 section 5): a drift is a plan
+# whose rear axle runs DRIFT_PAST past its peak in the corner's zone (multistart.slides_in's,
+# CORNER_FROM before the ramps to their end), the best of them the cell's drift. A cell where no
+# start stays in the drift valley has no drift to buy (`drift: false`): the live D seed would
+# fall back to grip there too. The grip time: the best plan that does not slide, the held
+# window's (rear within the peak + REAR_MARGIN) among them. Ice is never a planned slide (R5) and
+# is not run.
+
+S2_CLASSES = ("asphalt", "mud_wet", "snow_loose", "gravel", "snow_packed", "sand", "grass", "dirt")
+S2_ZONE_FROM = 30.0       # m before the ramps: multistart.CORNER_FROM
+S2_CAPS = {"front_slip_max": 1.0, "rear_slip_max": 3.0}   # live.Driver's defaults
+S2_OUT = os.path.join(SWB, "play_log/race_planner/style/m2")
+_S2W = {}
+
+
+def s2_window(held=None):
+    key = tuple(sorted((held or {}).items()))
+    if key not in _S2W:
+        from race_planner import window as wmod
+        wmod.SLOPE_MIN, wmod.KAPPA_MAX = 0.01, 0.6
+        _S2W[key] = wmod.Window(make_car(), ds=DS, length=LENGTH, grip=1.0, warm=False,
+                                tol=1e-6, max_iter=3000, **S2_CAPS, **(held or {}))
+    return _S2W[key]
+
+
+def s2_metrics(p, t, s_in, s_out, car, half_width):
+    """A plan in the corner: its time at s_out + EXIT_TIMED, feasible (good, on the road), the
+    rear axle's largest excursion past its peak (deg) in the zone, the metres of the zone it
+    runs DRIFT_PAST or more past it (each node's ds), and the zone's length."""
+    from race_planner import modes
+    X, s = p["X"], p["s"]
+    N = X.shape[1]
+    sf = np.vstack([getattr(t, k)[:N] for k in TYRE_FIELDS])
+    past = np.degrees(modes.past_peak(car, X, t.mu[:N], t.sliding[:N], sf))
+    zone = (s >= s_in - S2_ZONE_FROM) & (s <= s_out)
+    edge = max(0.0, float(np.max(np.abs(X[3]) - (half_width - 0.5 * car.width - 0.3))))
+    return {"t": float(np.interp(s_out + EXIT_TIMED, s, p["t"])),
+            "good": bool(good(dict(p, edge=edge))), "status": p["status"],
+            "past": float(past[zone].max()), "drift_m": float(DS * np.sum(past[zone] >= REAR_PAST)),
+            "zone_m": float(DS * zone.sum()), "iters": int(p["iters"]),
+            "solve_s": float(p["solve_s"])}
+
+
+def s2_case(cls, R, theta, half_width):
+    """One cell: every start's solve (s2_metrics), the cell's grip and drift times and the
+    signed loss (s and % of the grip time)."""
+    from race_planner.window import initial
+    car, tab = make_car(), SurfaceTable.from_yaml(CLASSES)
+    sf, mu, sl = tab.tyre(cls, car), tab.mu(cls, car), tab.sliding(cls)
+    sf = None if tuple(sf) == (1.0, 1.0, 1.0, 1.0) else sf
+    t, s_in, s_out = section(R, theta, mu, sl, surface=sf, half_width=half_width)
+    v0 = v_start(R, mu)
+    peak = rear_peak(mu, sl, None, sf)
+    held = {"rear_alpha_max": round(peak + REAR_MARGIN, 4)}
+    wf, wh = s2_window(), s2_window(held)
+    X0, U0 = initial(t, car, wf.margin, v0)
+    m = lambda p: s2_metrics(p, t, s_in, s_out, car, half_width)
+    runs = {}
+    h0 = _l1_solve(wh, t, v0, X0, U0)
+    runs["H0"] = (m(h0), h0)
+    runs["C"] = (m(p := _l1_solve(wf, t, v0, X0, U0)), p)
+    if good(h0):
+        Xh, Uh = h0["X"], h0["U"]
+        runs["G"] = (m(p := _l1_solve(wf, t, v0, Xh, Uh)), p)
+        runs["Ds"] = (m(p := _l1_solve(wf, t, v0, *seed_rear_out(Xh, Uh, t, s_in, s_out, car,
+                                                                  peak, mu))), p)
+        if theta >= math.radians(150.0):
+            runs["F"] = (m(p := _l1_solve(wf, t, v0, *seed_flick(Xh, Uh, t, s_in, s_out, car,
+                                                                  peak, mu))), p)
+    grip = {k: v for k, v in runs.items() if v[0]["good"] and v[0]["drift_m"] == 0}
+    drift = {k: v for k, v in runs.items() if v[0]["good"] and v[0]["drift_m"] > 0}
+    if grip:                                     # the held plan again from the best grip plan
+        bg = min(grip, key=lambda k: grip[k][0]["t"])
+        h1 = _l1_solve(wh, t, v0, _clip_slip(grip[bg][1]["X"], held, car), grip[bg][1]["U"])
+        runs["H1"] = (m(h1), h1)
+        if runs["H1"][0]["good"] and runs["H1"][0]["drift_m"] == 0:
+            grip["H1"] = runs["H1"]
+    row = {"surface": cls, "R": R, "theta": theta, "width": 2 * half_width, "mu": mu,
+           "sliding": sl, "v0": v0, "rear_peak": math.degrees(peak),
+           "starts": {k: v[0] for k, v in runs.items()}}
+    if grip:
+        bg = min(grip, key=lambda k: grip[k][0]["t"])
+        row.update(grip_from=bg, t_grip=grip[bg][0]["t"],
+                   noise=max(v[0]["t"] for v in grip.values()) - grip[bg][0]["t"])
+    row["drift"] = bool(drift)
+    if drift:
+        bd = min(drift, key=lambda k: drift[k][0]["t"])
+        row.update(drift_from=bd, t_drift=drift[bd][0]["t"], drift_m=drift[bd][0]["drift_m"],
+                   zone_m=drift[bd][0]["zone_m"], past=drift[bd][0]["past"])
+    if grip and drift:
+        row["loss_s"] = row["t_drift"] - row["t_grip"]
+        row["loss_pct"] = 100.0 * row["loss_s"] / row["t_grip"]
+    keep = {f"{k}_{a}": v[1][a] for k, v in runs.items() for a in ("X", "U", "t")}
+    keep["s"] = t.s
+    return row, keep
+
+
+def s2_forced_case(row):
+    """A cell with no drift valley (an s2-signed row, drift false): the drift forced
+    (race_planner/forced.py: the rear held DRIFT_PAST past its peak, rounded up to a degree,
+    from the ramps' start to the corner's middle), solved from Ds and, into a hairpin, F, each
+    built on the cell's grip plan (its stored H1, else H0). Returns the row with forced_*: the
+    best forced plan's time, drift metres, and the signed loss against the cell's grip time."""
+    from race_planner import forced
+    cls, R, theta, hw = row["surface"], row["R"], row["theta"], 0.5 * row["width"]
+    car, tab = make_car(), SurfaceTable.from_yaml(CLASSES)
+    sf, mu, sl = tab.tyre(cls, car), tab.mu(cls, car), tab.sliding(cls)
+    sf = None if tuple(sf) == (1.0, 1.0, 1.0, 1.0) else sf
+    t, s_in, s_out = section(R, theta, mu, sl, surface=sf, half_width=hw)
+    v0 = v_start(R, mu)
+    peak = rear_peak(mu, sl, None, sf)
+    angle = forced.angle_for(peak, REAR_PAST)
+    w = s2_window(forced.floor_kwargs(angle))
+    apex = 0.5 * (s_in + s_out)
+    forced.set_floor(w, t.s, s_in, apex, 1)
+    name = f"{cls}_{R:g}_{round(math.degrees(theta))}_{row['width']:g}.npz"
+    z = np.load(os.path.join(S2_OUT, "s2", name))
+    key = "H1" if "H1_X" in z else "H0"
+    Xh, Uh = z[f"{key}_X"], z[f"{key}_U"]
+    m = lambda p: s2_metrics(p, t, s_in, s_out, car, hw)
+    seeds = {"Ds": seed_rear_out(Xh, Uh, t, s_in, s_out, car, peak, mu)}
+    if theta >= math.radians(150.0):
+        seeds["F"] = seed_flick(Xh, Uh, t, s_in, s_out, car, peak, mu)
+    runs = {k: m(p) | {"floor": forced.floor_met(car, p["X"], p["s"], s_in, apex, 1, angle)}
+            for k, p in ((k, _l1_solve(w, t, v0, *x)) for k, x in seeds.items())}
+    out = dict(row, forced_angle=math.degrees(angle), forced_starts=runs)
+    okr = {k: v for k, v in runs.items() if v["good"] and v["floor"]}
+    if okr and row.get("t_grip") is not None:
+        b = min(okr, key=lambda k: okr[k]["t"])
+        out.update(forced_from=b, t_forced=okr[b]["t"], forced_drift_m=okr[b]["drift_m"],
+                   forced_zone_m=okr[b]["zone_m"],
+                   forced_loss_s=okr[b]["t"] - row["t_grip"],
+                   forced_loss_pct=100.0 * (okr[b]["t"] - row["t_grip"]) / row["t_grip"])
+    return out
+
+
+def s2_forced_run(row):
+    c = time.time()
+    try:
+        out = s2_forced_case(row)
+    except Exception as e:
+        import traceback
+        return dict(row, forced_error=repr(e), forced_trace=traceback.format_exc())
+    out["forced_wall_s"] = time.time() - c
+    return out
+
+
+def s2_forced_main(jobs):
+    """The forced arm over s2-signed.jsonl's cells with no drift valley: S2_OUT/s2-forced.jsonl."""
+    import json
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    rows = [json.loads(x) for x in open(os.path.join(S2_OUT, "s2-signed.jsonl"))]
+    rows = [r for r in rows if "error" not in r and not r["drift"]]
+    rows.sort(key=lambda r: r["surface"])
+    with open(os.path.join(S2_OUT, "s2-forced.jsonl"), "w") as f, ProcessPoolExecutor(jobs) as ex:
+        for i, r in enumerate(ex.map(s2_forced_run, rows, chunksize=4)):
+            f.write(json.dumps(r) + "\n")
+            f.flush()
+            print(i, r["surface"], r["R"], r["width"], round(math.degrees(r["theta"])),
+                  r.get("t_grip"), r.get("t_forced"), r.get("forced_loss_pct"),
+                  r.get("forced_drift_m"), r.get("forced_error"),
+                  round(r.get("forced_wall_s", 0)), flush=True)
+
+
+def s2_grid():
+    """The cells: the width arm's classes (M3b) at every width at R 9-25 and at 8 m at R 40,
+    60; the other classes at 8 m; 90 and 180 deg; ice never."""
+    for cls in S2_CLASSES:
+        for R, th in itertools.product(RADII, THETAS):
+            ws = WIDTHS if cls in W_CLASSES and R <= 25.0 else (8.0,)
+            for w in ws:
+                yield (cls, R, th, 0.5 * w)
+
+
+def s2_run(args):
+    c = time.time()
+    try:
+        row, keep = s2_case(*args)
+    except Exception as e:
+        import traceback
+        return {"args": list(args), "error": repr(e), "trace": traceback.format_exc()}, None
+    row["wall_s"] = time.time() - c
+    return row, keep
+
+
+def s2_main(jobs):
+    """S2's signed grid: S2_OUT/s2-signed.jsonl (a row a cell, every start's metrics in it) and
+    .npz (every plan). Cells already in the jsonl are kept (a stopped run resumes)."""
+    import json
+    os.makedirs(os.path.join(S2_OUT, "s2"), exist_ok=True)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    path = os.path.join(S2_OUT, "s2-signed.jsonl")
+    done = set()
+    if os.path.exists(path):
+        for line in open(path):
+            r = json.loads(line)
+            if "error" not in r:
+                done.add((r["surface"], r["R"], round(r["theta"], 4), r["width"]))
+    cases = [c for c in s2_grid() if (c[0], c[1], round(c[2], 4), 2 * c[3]) not in done]
+    # one class to a worker at a time: its windows compile once
+    with open(path, "a") as f, ProcessPoolExecutor(jobs) as ex:
+        for i, (row, keep) in enumerate(ex.map(s2_run, cases, chunksize=4)):
+            f.write(json.dumps(row) + "\n")
+            f.flush()
+            if keep is not None:
+                name = (f"{row['surface']}_{row['R']:g}_{round(math.degrees(row['theta']))}"
+                        f"_{row['width']:g}.npz")
+                np.savez_compressed(os.path.join(S2_OUT, "s2", name), **keep)
+            print(i, row.get("surface"), row.get("R"), row.get("width"),
+                  round(math.degrees(row.get("theta", 0))), row.get("t_grip"), row.get("t_drift"),
+                  row.get("loss_pct"), row.get("drift_m"), row.get("error"),
+                  round(row.get("wall_s", 0)), flush=True)
+
+
+def drift_losses():
+    """race_planner/drift_losses.json, S2's signed map (roadmap 065 M2; budget.LossMap) from the
+    s2-signed grid: per class, per cell (R, turn, width), the best drift's loss against the best
+    grip plan (s over the section; < 0 a gain) and its share of the corner's zone, or None for
+    both where no start stayed in the drift valley (or no grip plan converged)."""
+    import json
+    from race_planner.budget import LossMap
+    rows = [json.loads(x) for x in open(os.path.join(S2_OUT, "s2-signed.jsonl"))]
+    fpath = os.path.join(S2_OUT, "s2-forced.jsonl")
+    frc = {}
+    if os.path.exists(fpath):
+        for x in open(fpath):
+            r = json.loads(x)
+            frc[(r["surface"], r["R"], r["theta"], r["width"])] = r
+    cells = {}
+    for r in rows:
+        if "error" in r:
+            continue
+        key = (r["R"], r["theta"], r["width"])
+        f = frc.get((r["surface"],) + key, {})
+        if "loss_s" in r:                     # the drift valley's own
+            loss, share = r["loss_s"], r["drift_m"] / r["zone_m"]
+        elif "forced_loss_s" in f:            # forced: the floor held, the loss it costs
+            loss, share = f["forced_loss_s"], f["forced_drift_m"] / f["forced_zone_m"]
+        else:
+            loss = share = None
+        cells.setdefault(r["surface"], {})[key] = [
+            r["R"], r["theta"], r["width"], None if loss is None else round(loss, 5),
+            None if share is None else round(share, 4), "forced" in f and "loss_s" not in r]
+    m = LossMap({c: [v[k] for k in sorted(v)] for c, v in cells.items()},
+                {"concrete": "asphalt", "mud_soft": "mud_wet", "sand_loose": "sand"})
+    m.save(note="roadmap 065 M2: built by studies/drift_optimality.py drift-losses from the "
+                "s2-signed grid and its forced arm (S2_OUT): [R m, turn rad, width m, loss s (drift - "
+                "grip over the study's section; < 0 a gain; None: no drift found), share of the "
+                "zone, forced (the drift held by forced.py's floor: no valley of its own)]")
+    for c, v in m.cells.items():
+        n = sum(1 for x in v if x[3] is not None)
+        print(c, f"{n}/{len(v)} cells with a drift;",
+              [(x[0], round(math.degrees(x[1])), x[2], x[3]) for x in v])
+
+
 def run(job):
     kind, args = job
     c = time.time()
@@ -1265,6 +1528,12 @@ def main():
         return m2_report()
     if sys.argv[1:] == ["drift-map"]:                # race_planner/drift_map.json (M3b)
         return drift_map()
+    if sys.argv[1:2] == ["s2-signed"]:               # S2's signed grid (roadmap 065 M2)
+        return s2_main(int(sys.argv[2]) if len(sys.argv) > 2 else 2)
+    if sys.argv[1:2] == ["s2-forced"]:               # S2's forced arm (roadmap 065 M2)
+        return s2_forced_main(int(sys.argv[2]) if len(sys.argv) > 2 else 2)
+    if sys.argv[1:] == ["drift-losses"]:             # race_planner/drift_losses.json (065 M2)
+        return drift_losses()
     if sys.argv[1:] == ["m3b-width-report"]:
         return width_report()
     if sys.argv[1:] == ["library"]:                  # race_planner/corner_library.npz (M3)

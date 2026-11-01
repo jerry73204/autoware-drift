@@ -155,7 +155,8 @@ class Driver:
     rear_slip_low: float = 1.0
     # the driving style (roadmap 065; style.Style, a dict as Style.from_dict reads it, a YAML
     # path, or None: fastest, S1, today's planner bit for bit). Validated here, refused by name;
-    # a style the planner cannot run yet is refused (NotImplementedError). Changed live by
+    # a style the planner cannot run yet is refused (NotImplementedError; S2 needs multistart
+    # with a schedule, refused by name without). Changed live by
     # set_style, applied at the next re-plan outside a committed drift (style_due)
     style: object = None
     log: list = field(default_factory=list)
@@ -220,10 +221,14 @@ class Driver:
     def accept_style(self, x):
         """x as a validated style.Style the planner can run: refused by name (ValueError) if it
         is not a record, S3's slip floor checked against the rear cap on this track's surfaces
-        without fall-off, and NotImplementedError for a style not built yet (roadmap 065 M1:
-        S1 only)."""
+        without fall-off, S2 refused without the scheduled starts, and NotImplementedError for a
+        style not built yet (roadmap 065 M2: S1 and S2)."""
         from race_planner.style import as_style
         st = as_style(x)
+        if st.name == "drift_budget" and not (isinstance(self.multistart, dict)
+                                              and self.multistart.get("schedule") is not None):
+            raise ValueError("'name': drift_budget needs the scheduled starts (multistart with "
+                             "a schedule): its drifts are bought from the drift map")
         if st.name == "drift_max" and self.rear_slip_max is not None:
             st.check_slip_floor(self._flat_peaks(), self.rear_slip_max)
         return st.require_implemented()

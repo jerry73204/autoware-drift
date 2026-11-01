@@ -109,11 +109,19 @@ def straight(mu=1.12, sliding=None):
 
 def test_the_planner_refuses_a_style_not_built_yet():
     c = Car.from_spec(SPEC)
-    for rec in ({"name": "drift_budget", "eps_lap_s": 0.2}, {"name": "drift_max"}):
-        with pytest.raises(NotImplementedError, match=rec["name"]):
-            Driver(c, straight(), NoTracker(), style=rec)
-        with pytest.raises(NotImplementedError, match=rec["name"]):   # before any process
-            MultiStart(types.SimpleNamespace(style=None), style=rec)
+    rec = {"name": "drift_max"}
+    with pytest.raises(NotImplementedError, match=rec["name"]):
+        Driver(c, straight(), NoTracker(), style=rec)
+    with pytest.raises(NotImplementedError, match=rec["name"]):   # before any process
+        MultiStart(types.SimpleNamespace(style=None), style=rec)
+    # S2 runs (M2), on the scheduled starts only: refused by name without them
+    rec = {"name": "drift_budget", "eps_lap_s": 0.2}
+    with pytest.raises(ValueError, match="^'name'.*schedul"):
+        Driver(c, straight(), NoTracker(), style=rec)
+    with pytest.raises(ValueError, match="^'name'.*schedul"):
+        Driver(c, straight(), NoTracker(), style=rec, multistart={"flick": True})
+    with pytest.raises(ValueError, match="^'name'.*schedul"):     # before any process
+        MultiStart(types.SimpleNamespace(style=None), style=rec)
     with pytest.raises(ValueError, match="^'eps_window'"):
         Driver(c, straight(), NoTracker(), style={"eps_window": 0.01})
     assert Driver(c, straight(), NoTracker()).style == FASTEST
@@ -149,13 +157,13 @@ def _driver_with_slide(monkeypatch):
 def test_a_style_change_waits_while_a_committed_drift_is_within_ahead(monkeypatch):
     d, c = _driver_with_slide(monkeypatch)
     zone0 = c.s_in - CORNER_FROM
-    assert d.set_style({"name": "drift_budget", "eps_lap_s": 0.2}).name == "drift_budget"
+    assert d.set_style({"name": "drift_max"}).name == "drift_max"
     assert d.style.name == "fastest"                                  # not before a re-plan
     for s in (zone0 - AHEAD + 1.0, zone0 + 5.0, c.s_out - 1.0):       # near it, in it
         assert d.style_due({"t": 0.0, "s": s}) == "deferred"
-        assert d.style.name == "fastest" and d.style_pending.name == "drift_budget"
+        assert d.style.name == "fastest" and d.style_pending.name == "drift_max"
     assert d.style_due({"t": 1.0, "s": c.s_out + 1.0}) == "applied"   # past it
-    assert d.style.name == "drift_budget" and d.style_pending is None
+    assert d.style.name == "drift_max" and d.style_pending is None
     assert d.style_due({"t": 2.0, "s": c.s_out + 2.0}) is None
     assert [e["event"] for e in d.style_log] == ["requested"] + ["deferred"] * 3 + ["applied"]
 

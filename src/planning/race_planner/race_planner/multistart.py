@@ -30,6 +30,7 @@ and a drift only when its slide starts at least `ahead` metres into the window (
 braking must not be cut short). The car starts in grip, so a tie stays grip. The adoption rules
 are live.Driver's: a fixed latency (the budget) and adopted once the car reaches its first node.
 """
+import math
 import multiprocessing as mp
 import os
 import time
@@ -69,9 +70,38 @@ def slides_in(plan, c, past=None):
                        & (plan["s"] <= c.s_out)))
 
 
-def _worker(conn, car, track, kw, cpus, held=None):
+def drift_metres(plan, c, past_deg):
+    """S2's drift measure D_k: the metres of corner c's zone (CORNER_FROM before its turn-in to
+    its exit) over which the plan's rear axle runs past_deg or more past its tyre's peak
+    (style.drift_past_deg; plan["past"] from MultiStart.classify, rad); 0 with no corner."""
+    if c is None:
+        return 0.0
+    import math
+    s = np.asarray(plan["s"], float)
+    on = (plan["past"] >= math.radians(past_deg)) & (s >= c.s_in - CORNER_FROM) & (s <= c.s_out)
+    ds = np.diff(s, append=s[-1] + (s[-1] - s[-2] if len(s) > 1 else 0.0))
+    return float(np.sum(ds[on]))
+
+
+def s2_classes(sch, track):
+    """S2's view of a corner through a schedule.Scheduler: (classes(c) -> ({class: its largest
+    probability over the approach and the corner, those at least p_add}, the least road width
+    there), flat(class) -> no fall-off past the peak), as the scheduler reads them."""
+    a = sch.rules["approach"]
+
+    def classes(c):
+        m = (track.s >= c.s_in - a) & (track.s <= c.s_out)
+        pc = sch._probs(track.s[m])
+        probs = {k: float(np.max(v)) for k, v in pc.items()
+                 if float(np.max(v)) >= sch.rules["p_add"]}
+        return probs, float(np.min(track.w_left[m] + track.w_right[m]))
+    return classes, (lambda k: sch.table.sliding(k) >= sch.rules["flat"])
+
+
+def _worker(conn, car, track, kw, cpus, held=None, floors=None):
     """A seed's process: one Window (or, for H, one per bound in `held`, degrees: the rear
-    axle's slip angle held within it), solving what it is sent until it is sent None."""
+    axle's slip angle held within it; for S2's B, one per floor in `floors`, degrees: the rear
+    held past it on a stretch, forced.py), solving what it is sent until it is sent None."""
     if cpus:
         os.sched_setaffinity(0, cpus)
     import math
@@ -79,6 +109,9 @@ def _worker(conn, car, track, kw, cpus, held=None):
     from race_planner.window import Window
     if held:
         ws = {b: Window(car, rear_alpha_max=math.radians(b), **kw) for b in held}
+    elif floors:
+        from race_planner import forced
+        ws = {b: Window(car, **forced.floor_kwargs(math.radians(b)), **kw) for b in floors}
     else:
         w = Window(car, **kw)
     conn.send("ready")
@@ -89,6 +122,10 @@ def _worker(conn, car, track, kw, cpus, held=None):
         i0, x0, v_end, mu, start = msg
         if held:
             w = ws[start["bound"]]
+        elif floors:                         # (degrees, from, to, sign): the corner's floor
+            deg, a, b, sign = start["floor"]
+            w = ws[deg]
+            forced.set_floor(w, w.section(track, i0).s, a, b, sign)
         if "plan" in start:                  # a plan shifted, with its multipliers
             w.lam, w.lam_x = _fitting(w, start["plan"].get("lam"), start["plan"].get("lam_x"))
             X, U = warm_from(w, start["plan"], i0, x0, track)
@@ -127,7 +164,7 @@ class MultiStart:
 
     def __init__(self, driver, threshold=THRESHOLD, confirm=CONFIRM, ahead=AHEAD, flick=False,
                  seed_budget=None, max_iter=400, cpus=None, library=True, schedule=None,
-                 perception=None, h_competes=False, style=None):
+                 perception=None, h_competes=False, style=None, loss_map=None, lap=None):
         """schedule (roadmap 061 M3b): None, M3's fixed starts ({G, D}, F with `flick`, G in a
         process of its own); else the starts chosen per re-plan by a schedule.Scheduler built
         from this dict (its keyword arguments: table, a track.SurfaceTable, default swb's;
@@ -138,12 +175,19 @@ class MultiStart:
         when no free start (G, D, F) has a feasible plan (M3b's chain check: as a competitor it
         held the grip mode on a slower plan wherever the free G slid by itself, Tsukuba +0.55 %).
         style (roadmap 065): a style.Style (or what style.as_style takes); None, the driver's
-        (live.Driver.style), else fastest. M1 runs S1 only (NotImplementedError for the rest);
-        S1 is this class unchanged."""
+        (live.Driver.style), else fastest. S1 is this class unchanged; S2 (drift_budget, M2)
+        needs the schedule (refused without it: ValueError naming 'name'); S3 is refused
+        (NotImplementedError). loss_map: S2's budget.LossMap or its path (default
+        budget.LOSS_MAP); lap: S2's budget per lap of this length (m) on a circuit driven as
+        laps (serve.py's), None per run (design 065 call 3)."""
         d = driver
         from race_planner.style import as_style
         self.style = as_style(getattr(d, "style", None) if style is None else style)
         self.style.require_implemented()
+        if self.style.name == "drift_budget" and schedule is None:
+            raise ValueError("'name': drift_budget needs the scheduled starts (multistart's "
+                             "schedule): its drifts are bought from the drift map")
+        self.loss_map, self.lap, self.s2 = loss_map, lap, None
         self.car, self.track, self.grip = d.car, d.track, d.grip
         self.threshold, self.confirm, self.ahead = threshold, confirm, ahead
         self.scheduler, self.perception = None, perception
@@ -163,6 +207,15 @@ class MultiStart:
         else:
             self.slots = ("G", "D", "F") if flick else ("G", "D")
         self.held, self.h_competes = held, h_competes
+        floors = None
+        if (self.style.name == "drift_budget" and self.scheduler is not None
+                and getattr(d, "beta_max", None) is None):
+            # S2's B: a bought corner's drift forced (forced.py), one window a floor angle over
+            # the track's corners (built at the start: a style switched to S2 later runs without)
+            floors = sorted({self._floor(c)[0] for c in modes.corners(d.track, d.grip)})
+            if floors:
+                self.slots = self.slots + ("B",)
+        self.floors = floors
         kw = {"ds": d.ds, "length": d.length, "grip": d.grip, "max_iter": max_iter,
               "beta_max": getattr(d, "beta_max", None),
               "front_slip_max": getattr(d, "front_slip_max", None),
@@ -180,8 +233,10 @@ class MultiStart:
                     continue                 # G is solved in the driver's process
                 a, b = ctx.Pipe()
                 cpu = None if not cpus else {cpus[k % len(cpus)]}
-                p = ctx.Process(target=_worker, args=(b, d.car, d.track, kw, cpu,
-                                                      held if slot == "H" else None), daemon=True)
+                args = (b, d.car, d.track, kw, cpu, held if slot == "H" else None)
+                if slot == "B":
+                    args = args + (floors,)
+                p = ctx.Process(target=_worker, args=args, daemon=True)
                 p.start()
                 self.conns[slot], self.procs = a, self.procs + [p]
         finally:
@@ -315,7 +370,16 @@ class MultiStart:
     def choose(self, res, rec=None):
         """The seed whose plan is adopted, from each seed's result (ok, time, mode, onset): the
         fastest feasible plan of the mode chosen, the mode changed by the hysteresis gate (module
-        docstring); None if no plan is feasible. rec, if given, is filled in."""
+        docstring); None if no plan is feasible. rec, if given, is filled in. Under S2
+        (drift_budget, roadmap 065) _choose_s2, which is this gate wherever S2 has nothing to
+        buy."""
+        st = getattr(self, "style", None)
+        if st is not None and st.name == "drift_budget":
+            return self._choose_s2(res, rec)
+        return self._choose_s1(res, rec)
+
+    def _choose_s1(self, res, rec=None):
+        """S1's gate (choose's docstring): today's, unchanged."""
         rec = {} if rec is None else rec
         rec["mode_before"] = self.mode
         if not getattr(self, "h_competes", True) and "H" in res and any(
@@ -350,6 +414,94 @@ class MultiStart:
             self.count = 0
         rec.update(chosen=best[self.mode], mode=self.mode, count=self.count)
         return best[self.mode]
+
+    # ---- S2, drift_budget (roadmap 065 M2; design 065 4.3, call 3) ----
+
+    def _choose_s2(self, res, rec=None):
+        """S2's gate for the corner the choice is about (self._corner), by its kind in the lap's
+        plan (self.s2, budget.S2Lap):
+
+        - 'budget' (bought offline by the knapsack): the fastest drift plan is entered when it
+          is no slower than the fastest grip plan by more than the corner's price (its predicted
+          loss, at least 0) plus `threshold` (the 0.3 % noise) on `confirm` re-plans, and left
+          beyond that plus exit_hyst on `confirm` re-plans (or at once with no drift plan);
+        - 'lex' (eps_window, classes without fall-off): among the plans within (1 + eps) of the
+          fastest, the one that drifts most (drift_m, the corner's metres drift_past_deg past the
+          peak; the faster on a tie), entered on `confirm` re-plans while the account can pay
+          its price (the map's, else the window's measured loss; only with eps_lap_s set), left
+          when no drift plan is within (1 + eps + exit_hyst) on `confirm` re-plans;
+        - None (no corner, or one S2 does not buy): S1's gate (_choose_s1).
+
+        A drift's slide must start `ahead` metres into the window, as S1's. The account is
+        debited once a corner, when its drift is entered."""
+        rec = {} if rec is None else rec
+        lap, c = self.s2, getattr(self, "_corner", None)
+        kind = lap.kind(c)
+        if kind is None:
+            out = self._choose_s1(res, rec)
+            rec["s2"] = None
+            return out
+        rec["mode_before"] = self.mode
+        if not getattr(self, "h_competes", True) and "H" in res and any(
+                r["ok"] for k, r in res.items() if k != "H"):
+            res = {k: r for k, r in res.items() if k != "H"}     # H: the fallback only
+        ok = {k: r for k, r in res.items() if r["ok"]}
+        if not ok:
+            self.count = 0
+            rec.update(chosen=None, mode=self.mode)
+            return None
+        fast = lambda ks: min(ks, key=lambda k: ok[k]["time"])
+        most = lambda ks: max(ks, key=lambda k: (ok[k].get("drift_m", 0.0), -ok[k]["time"]))
+        grip = [k for k in ok if ok[k]["mode"] == "grip"]
+        drift = [k for k in ok if ok[k]["mode"] == "drift"]
+        t_min = min(r["time"] for r in ok.values())
+        g = fast(grip) if grip else None
+        ref = ok[g]["time"] if g is not None else t_min
+        price = lap.price(c)
+        info = {"kind": kind, "corner": c.s_in, "t_grip": None if g is None else ref}
+        if kind == "budget":
+            d = fast(drift) if drift else None
+            allow = max(0.0, price.loss_s) + self.threshold * ref
+            loss = None if d is None else ok[d]["time"] - ref
+            enter = d is not None and loss <= allow
+            stay = d is not None and loss <= allow + lap.h * ref
+            predicted = price.loss_s
+            info.update(allow=allow, loss=loss)
+        else:
+            within = [k for k in drift if ok[k]["time"] <= (1 + lap.eps) * t_min]
+            wider = [k for k in drift if ok[k]["time"] <= (1 + lap.eps + lap.h) * t_min]
+            d = most(within) if within else most(wider) if wider else (
+                fast(drift) if drift else None)
+            loss = None if d is None else ok[d]["time"] - ref
+            predicted = price.loss_s if price is not None else (loss or 0.0)
+            pays = lap.style.eps_lap_s <= 0 or max(0.0, predicted) <= lap.account.free() + 1e-12
+            enter = bool(within) and pays
+            stay = bool(wider)
+            info.update(eps=lap.eps, loss=loss, predicted=predicted, pays=pays)
+        if self.mode == "grip":
+            if g is None:                    # no grip plan: the drift (S1 changes mode too)
+                self.mode, self.count = "drift", 0
+                lap.account.debit(c.s_in, predicted, kind + ", no grip plan")
+            elif enter and ok[d]["onset"] is not None and ok[d]["onset"] >= self.ahead:
+                self.count += 1
+                if self.count >= self.confirm:
+                    self.mode, self.count = "drift", 0
+                    lap.account.debit(c.s_in, predicted, kind)
+            else:
+                self.count = 0
+        else:
+            if d is None:                    # the slide is over, or no drift plan
+                self.mode, self.count = "grip", 0
+            elif stay:
+                self.count = 0
+            else:
+                self.count += 1
+                if self.count >= self.confirm and g is not None:
+                    self.mode, self.count = "grip", 0
+        chosen = g if self.mode == "grip" else d
+        info["account"] = round(lap.account.remaining, 4)
+        rec.update(chosen=chosen, mode=self.mode, count=self.count, s2=info)
+        return chosen
 
     # ---- the scheduled starts (roadmap 061 M3b) ----
 
@@ -409,6 +561,18 @@ class MultiStart:
         running = [k for k in ("D", "F") if self._slides_in(self.last[k], corner)]
         scn = self.scheduler.scan(s0, s1)
         want, why = self.scheduler.starts(scn, corner, running)
+        s2 = self.style.name == "drift_budget"
+        if s2:                               # S2: a D (and H) into a corner it may buy
+            lap = self._s2_lap()
+            kind = lap.kind(corner)
+            if kind and "D" not in want and corner.s_in - s0 >= self.scheduler.rules["ahead"]:
+                want = want | {"H", "D"}
+                why = why + [f"s2 {kind}"]
+            if "B" in self.conns and kind == "budget" and (
+                    corner.s_in - s0 >= self.scheduler.rules["ahead"]
+                    or self._slides_in(self.last["B"], corner)):
+                want = want | {"H", "B"}
+                why = why + ["s2 forced"]
         adopted = d.plan
         g_from = adopted if adopted.get("mode", "grip") == "grip" else self.last["G"]
         if g_from is None:
@@ -431,6 +595,15 @@ class MultiStart:
                 kind, seed = self._seed(slot, base, sec, corner)
                 if seed is not None:
                     starts[slot], kinds[slot] = {"X": seed[0], "U": seed[1]}, kind
+            if "B" in want:                  # S2: the bought corner's drift, forced
+                fl = self._floor(corner)
+                own = self.last["B"]
+                if self._slides_in(own, corner) and own.get("floor") == fl:
+                    starts["B"], kinds["B"] = {"plan": own, "floor": fl}, "own"
+                else:
+                    kind, seed = self._seed("D", base, sec, corner)
+                    if seed is not None:
+                        starts["B"], kinds["B"] = {"X": seed[0], "U": seed[1], "floor": fl}, kind
             if "H" in want:
                 b = self._bound(i0, n)
                 own = self.last["H"]
@@ -460,21 +633,26 @@ class MultiStart:
             r = res.get(slot)
             if slot in res or slot == "G":
                 self.last[slot] = r if r is not None and r["ok"] else None
-            elif slot in ("D", "F", "H"):
+            elif slot in ("D", "F", "H", "B"):
                 self.last[slot] = None       # not run: its plan is no longer current
             if r is not None and r["ok"]:
                 if slot == "H":
                     r["bound"] = starts["H"]["bound"]
+                if slot == "B":
+                    r["floor"] = starts["B"]["floor"]
                 self.classify(r, i0, mu, corner)
                 if corner is None:
                     r["mode"], r["onset"] = self.mode, None
+                if s2:
+                    r["drift_m"] = drift_metres(r, corner, self.style.drift_past_deg)
         rec = {"s0": s0, "i0": i0, "wall": wall,
                "corner": None if corner is None else corner.s_in,
                "slots": sorted(res), "why": why,
                "seeds": {slot: {"start": kinds[slot], "ok": bool(r["ok"]), "iters": int(r["iters"]),
                                 "solve_s": float(r["solve_s"]), "status": r["status"],
                                 "time": float(r["time"]), "mode": r.get("mode"),
-                                "onset": r.get("onset")}
+                                "onset": r.get("onset"),
+                                **({"drift_m": r.get("drift_m")} if s2 else {})}
                          for slot, r in res.items()}}
         slot = self.choose(res, rec)
         self.records.append(rec)
@@ -482,3 +660,23 @@ class MultiStart:
             worst = max(res.values(), key=lambda r: r["iters"])
             return dict(worst, ok=False, status="no seed feasible"), wall
         return dict(res[slot], slot=slot), wall
+
+    def _floor(self, c):
+        """S2's floor for corner c: (whole degrees past which the rear is held, from its turn-in,
+        to its middle, its hand) (forced.py; the peak at the planner's friction there)."""
+        from race_planner import forced
+        peak = modes.rear_peak(self.car, c.mu, c.sliding, c.surface)
+        deg = int(round(math.degrees(forced.angle_for(peak, self.style.drift_past_deg))))
+        return (deg, float(c.s_in), float(0.5 * (c.s_in + c.s_out)), float(c.sign))
+
+    def _s2_lap(self):
+        """S2's plan for the run (budget.S2Lap), built at the first S2 re-plan and again when the
+        style changes (a new account: the budget counts from the change)."""
+        if self.s2 is None or self.s2.style != self.style:
+            from race_planner.budget import LossMap, S2Lap
+            lm = self.loss_map
+            if not isinstance(lm, LossMap):
+                lm = LossMap.load() if lm is None else LossMap.load(lm)
+            classes, flat = s2_classes(self.scheduler, self.track)
+            self.s2 = S2Lap.build(self.style, self.corners, classes, lm, flat, lap=self.lap)
+        return self.s2

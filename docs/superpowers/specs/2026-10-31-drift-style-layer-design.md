@@ -218,3 +218,14 @@ Settled by the author, not yet confirmed by the user:
 Zone-plan construction details, the knapsack solver, the M library's continuation path, L2
 weight values within 3–5, the swing-rate penalty form, file layout. Thresholds come from the
 experiments in roadmap 065.
+
+## 10. Amendments from the build (roadmap 065 M2, 2026-11-01)
+
+- **Call 3, the forced drift.** M2's E2 found no drift valley where a drift loses time: from every
+  drift seed the window slides back to grip there, so a D start can never be "a drift that costs a
+  little". S2's map prices such a corner with the drift held (`forced.py`: the rear `drift_past_deg`
+  past its peak, rounded up to a degree, from turn-in to the corner's middle, by the window's
+  held-slip rows with a negative bound), and live a bought corner gets a B start with the same floor.
+  Hard rows, not elastic: a floor that cannot hold leaves grip. Nothing of section 5 moves.
+- **Call 3, gain corners.** A corner whose drift gains is bought at no cost and entered at a tie
+  (allowance 0.3 %), where S1 needs 0.3 % faster. Results and rulings: `docs/drift-style-m2.md`.

@@ -15,8 +15,9 @@ message starts with the field's name in quotes. A field that belongs to another 
 record's, set to other than its default, is refused too (design 8, call 9, and its extension
 to S2 against S3: a field that does nothing is a mistake, not a setting).
 
-Roadmap 065 M1 builds the record and its plumbing only: S1 runs; S2 and S3 validate, and the
-planner refuses to run them (NotImplementedError, `require_implemented`) until M3 and M5.
+Roadmap 065 M1 built the record and its plumbing (S1); M2 runs S2 (budget.py, the gate in
+multistart.py); S3 validates and the planner refuses to run it (NotImplementedError,
+`require_implemented`) until M5.
 """
 from dataclasses import MISSING, dataclass, field, fields
 import math
@@ -24,7 +25,7 @@ import math
 import yaml
 
 NAMES = ("fastest", "drift_budget", "drift_max")
-IMPLEMENTED = ("fastest",)          # the styles the planner runs (M1: S1 only)
+IMPLEMENTED = ("fastest", "drift_budget")   # the styles the planner runs (M2: S1, S2)
 
 # the fields each style reads; the rest must keep their defaults under it
 S2_FIELDS = ("eps_lap_s", "eps_window", "exit_hyst")
@@ -201,10 +202,10 @@ class Style:
         return self.name in IMPLEMENTED
 
     def require_implemented(self):
-        """Refuse a style the planner cannot run yet (roadmap 065 M1: S1 only)."""
+        """Refuse a style the planner cannot run yet (roadmap 065 M2: S1 and S2)."""
         if not self.implemented:
             raise NotImplementedError(
-                f"style {self.name!r} validates but is not built yet (roadmap 065: S2 at M3, "
+                f"style {self.name!r} validates but is not built yet (roadmap 065: "
                 f"S3 at M5); the planner runs {', '.join(IMPLEMENTED)} only, and never runs a "
                 "style it was not asked for")
         return self
