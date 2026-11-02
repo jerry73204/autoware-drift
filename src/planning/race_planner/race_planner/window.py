@@ -218,7 +218,14 @@ def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
     so nothing but this keeps the plan out of a slide the car cannot be held in (docs/issues/
     002). Elsewhere the model's own fall-off does (the rows are there, UNBOUND wide), except
     k_rear_low: the rear's bound on a surface that falls off deepest (sliding share SLIDING_LOW
-    or less) and whose planned friction p[1] is mu_low or less: ice (issue 003); None for none."""
+    or less) and whose planned friction p[1] is mu_low or less: ice (issue 003); None for none.
+
+    The front's row binds too on a road that falls off, not deepest (sliding share above
+    SLIDING_LOW), whose planned friction is mu_low or less: packed snow (issue 017). There the
+    fall-off kept 0.8 of the peak force, enough for the plan to brake with the front at eight
+    of its peaks (40 deg of steering on the chain's hairpin approach), where the steering no
+    longer moves the car. Not on ice: its front is the plan's only brake besides the rear's
+    regen (M4f, issue 009), and not on the grippy roads (asphalt), where nothing asked it."""
     x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", NU), ca.SX.sym("p", NP)
     vx, vy, r, delta = x[0], x[1], x[2], x[5]
     tp = model.peaks(car)[1] * p[7]
@@ -229,7 +236,9 @@ def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
         c, s = ca.cos(delta), ca.sin(delta)
         lx, ly = c * vx + s * uy, -s * vx + c * uy
         tan_a = ly / (ca.sqrt(lx * lx + 1e-4) + model.SLIP_LAT_OFFSET)
-        rows.append(tan_a / (ca.if_else(flat, k_front, UNBOUND) * tp))
+        # and on a slippery surface that falls off, not deepest (packed snow: issue 017)
+        mild = ca.logic_and(p[1] <= mu_low, p[3] > SLIDING_LOW)
+        rows.append(tan_a / (ca.if_else(ca.logic_or(flat, mild), k_front, UNBOUND) * tp))
     if k_rear is not None or k_rear_low is not None:
         tan_a = (vy - car.lr * r) / (ca.sqrt(vx * vx + 1e-4) + model.SLIP_LAT_OFFSET)
         k_flat = UNBOUND if k_rear is None else k_rear

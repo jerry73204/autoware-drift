@@ -302,3 +302,28 @@ def test_the_stage_arriving_at_snow_brakes_the_rear_within_the_snows_grip():
     b = np.asarray(gr(x, u, p + [float(k[arrive][0])])).ravel()
     assert np.all(base[REAR_USE_ROWS] < -0.05)
     assert np.allclose(b[REAR_USE_ROWS], base[REAR_USE_ROWS] * 1.12 / 0.25, rtol=1e-3)
+
+
+def test_the_front_slip_bound_holds_on_packed_snow_but_not_on_ice_or_asphalt():
+    """Issue 017: packed snow falls off past its peak (sliding 0.8), so the front's row was left
+    unbound there and the chain's plans braked with the front tyres at eight of its peaks on the
+    hairpin's approach (40 deg of steering, no lateral authority left: the car left the road).
+    The front's row now binds on every slippery road (planned friction MU_LOW or less) that does
+    not fall off deepest: packed snow as the flat roads; ice (its front the car's only brake,
+    M4f) and asphalt as before."""
+    from race_planner.window import MU_LOW, NP, NU, node_functions, slip_rows
+    c = car()
+    _, g, _, _, _ = node_functions(c, tyres=True)
+    gs = slip_rows(c, g, 1.0, None, None, 0.92 * MU_LOW)
+    x = [12.0, 0.0, 0.0, 0.0, 0.0, math.radians(40.0)]     # the front at about 40 deg
+    u = [0.0] * NU
+
+    def row(mu, sliding):
+        p = [0.0, 0.92 * mu, 0.0, sliding, 1.0, 1.0, 1.0, 1.0]
+        assert len(p) == NP
+        return abs(float(np.asarray(gs(x, u, p)).ravel()[-1]))
+
+    assert row(0.2, 0.8) > 3.0                     # packed snow: bound, 40 deg far past it
+    assert row(0.2, 0.8) == pytest.approx(row(0.25, 1.0))     # as loose snow (flat), as before
+    assert row(0.265, 0.7) < 0.01                                     # ice: free, as before
+    assert row(1.12, 0.8) < 0.01                                      # asphalt: free, as before
