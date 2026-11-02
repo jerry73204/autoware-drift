@@ -44,7 +44,9 @@ THRESHOLD = 0.003     # of the window's time: M1's noise floor (the live p75 on 
 CONFIRM = 2           # re-plans in a row
 AHEAD = 25.0          # m: a drift's slide starts at least this far into the window
 EXCLUDE = 12.0        # m: a plan's first metres say nothing of its mode (the car's own slide)
-SEED_SHARE = 0.9      # of the re-plan's budget, each seed's: the answers and the choice fit in it
+SEED_SHARE = 0.85     # of the re-plan's budget, each start's (G too when scheduled): the slowest
+                      # answer, the messaging and the choice fit in it (065 M3: 0.9 s seeds and a
+                      # 1.0 s G put the re-plan's p95 at 0.914 s, past R6's 0.9)
 SEED_LEAD = 10.0      # m: a corner is seeded only while its turn-in is this far ahead or more
 CORNER_FROM = 30.0    # m before the turn-in a corner's slide may start (the seeds' D_FROM is 25)
 
@@ -230,6 +232,11 @@ class MultiStart:
               "rear_slip_low": getattr(d, "rear_slip_low", None),
               "free_stages": getattr(d, "free_stages", 0),
               "budget": SEED_SHARE * d.budget if seed_budget is None else seed_budget}
+        if self.scheduler is not None and d.warm.budget != kw["budget"]:
+            # G is solved in the driver's process (replan_scheduled) on d.warm: on the seeds'
+            # budget, not the re-plan's whole, or the slowest start is G's (065 M3, R6)
+            from race_planner.window import Window
+            d.warm = Window(d.car, **kw)
         ctx = mp.get_context("spawn")        # a fresh interpreter: no solver state forked
         omp = os.environ.get("OMP_NUM_THREADS")
         os.environ["OMP_NUM_THREADS"] = "1"  # one core a seed

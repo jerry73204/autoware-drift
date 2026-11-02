@@ -50,7 +50,7 @@ OUT = os.environ.get("E1_OUT", os.path.join(SWB, "play_log/race_planner/mode_cho
 GRIP = 0.92
 DS = 4.0
 DT = 0.05                     # s: the follower's step (no plant: the plan is the car)
-SEED_BUDGET = 0.9             # s: each seed's max_wall_time (the re-plan's latency is 1.0)
+SEED_BUDGET = 0.85            # s: each start's max_wall_time (the re-plan's latency is 1.0)
 CHAIN = ((25, 90), (9, 180), (60, 90), (15, 180), (40, 180), (9, 90), (25, 180), (60, 180),
          (15, 90), (40, 90))
 STRAIGHT, RAMP, HALF = 120.0, 8.0, 4.0
