@@ -306,3 +306,33 @@ step is R6's, not S2's: seed budgets that end inside 0.9 s with the messaging (e
 and G), which touches S1's timed runs (not its RP_DET digests) and is the user's call, or B warm
 started from its last plan on the next corner, which cuts its iterations without cutting its
 plans. S2 stays selectable (it always was: a style record), with the live gate and course prices.
+
+## 8. R6 at 0.85 s budgets (2026-11-02)
+
+The user took the recommendation above: every start, G included when scheduled, on a 0.85 s wall
+budget (afd0cc5). The timed E3 of section 7 again, same method, same courses and prices, on
+b4854da; one invalid run (asphalt S1 j0, its slow re-plans over 10 %) redone. Results under swb's
+`play_log/race_planner/style/r6_085/`.
+
+| course | arm | time s, mean | vs S1, mean (draws) | within budget + 0.3 % | L1 p95 s, old -> new | L1 p99 s, new | overruns of 1 s, old -> new |
+|---|---|---|---|---|---|---|---|
+| Haruna | S1 | 76.58 | | | 0.610 -> 0.712 | 0.853 | 2 -> 0 of 225 |
+| | S2 0.5 s | 76.77 | +0.19 (+0.55, -0.16, +0.19) | 3 of 3 | **0.914 -> 0.862** | 0.866 | 4 -> 0 of 225 |
+| | S2 0.5 s, B capped at 110 | 76.60 | +0.02 (+0.10, -0.18, +0.14) | 3 of 3 | 0.793 -> 0.850 | 0.861 | 1 -> 0 of 225 |
+| asphalt R 25 x 90 | S1 | 9.50 | | | 0.615 -> 0.616 | 0.793 | 0 -> 0 of 27 |
+| | S2 0.2 s | 9.44 | -0.06 | 3 of 3 | 0.916 -> 0.866 | 0.869 | 0 -> 0 of 27 |
+| dirt R 25 x 90 | S1 | 12.25 | | | **1.003 -> 0.854** | 0.857 | 3 -> 0 of 36 |
+| | S2 0.1 s | 12.02 | -0.23 | 3 of 3 | 1.002 -> 0.870 | 0.871 | 4 -> 0 of 36 |
+
+**R6 met in every row**: L1 p95 at most 0.870 s, p99 at most 0.871 s, no re-plan past 1 s. The
+budgets set the tail as section 7 found: the slowest start ends at 0.85 s and the rest is
+messaging. Lap times do not move beyond the draws' spread (Haruna S1 76.58 against 76.44, S2 0.5 s
+76.77 against 76.59; corners within 0.02 s). On the chain (repeatable runs, every start at 0.85,
+0.9, and 0.9 / G 1.0) the budget costs nothing measurable (roadmap 061, "Chain blockers after
+issue 013"). Haruna S1 j2 started at a 1-min load of 8.2 (the loop's gate read 6) and is kept: its
+slow re-plans are under 10 %.
+
+**DP2**: the user's rule (adopt once a timed E3 shows L1 p95 <= 0.9 s) is met on every course and
+arm, with B capped and uncapped. S2 is adopted: a supported style (`drift_budget`) with the live
+gate and course prices, on the default budgets. B's iteration cap stays an option, not the
+default (it met R6 already uncapped). S1 stays the default style.
