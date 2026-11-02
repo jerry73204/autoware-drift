@@ -252,11 +252,25 @@ def recover_gains(car, mu, sliding, s, recover=None, probe=None):
     (recover x sliding share) - 1 on a held node (axle.held, at the planned friction `mu`)
     within `probe` (PROBE) m after the last node that is not, 0 elsewhere (no bound). A course
     that starts on a held road has none there: its car has braked on it before (the studies
-    prime its ECU, sim.Plant.regen_grip_found)."""
+    prime its ECU, sim.Plant.regen_grip_found).
+
+    And the stage that arrives at a road where regen can slip the rear but the model does not
+    hold it (mu below axle.regen_slip_mu, not held: snow, mud) from one where regen cannot
+    slip it: its rear braking within that road's grip, in its first node's friction (the
+    gain mu_i / mu_i+1 - 1). Issue 016: the model's premise there is that the car never
+    slips its rear and so never holds regen (axle.held), and the arrival broke it: the
+    plant's road changes inside the stage (its nodes 1 m, the plan's 4) and L2 eases the
+    request from the stage's own to the next's across it, so the car met the snow with the
+    asphalt's braking, the ECU put it on the rear as regen first (2.6-2.8 kN on a rear that
+    carries 1.9), the rear slipped, and the regen slip control held regen at the grip it read
+    in that event (0.135 on loose snow's 0.23) for the rest of the road: the plan's
+    rear-braked rotation was not there. A held road's arrival is issue 013's (its first
+    metres; the arrival bound there too cost the chain's ice zone 2 of 4 draws)."""
     k = RECOVER if recover is None else recover
     d = PROBE if probe is None else probe
     mu, sliding, s = (np.asarray(v, float) for v in (mu, sliding, s))
-    held = (mu < axle.regen_slip_mu(car)) & (sliding <= axle.HOLD_SLIDING)
+    slick = mu < axle.regen_slip_mu(car)
+    held = slick & (sliding <= axle.HOLD_SLIDING)
     out = np.zeros(len(s))
     last = -np.inf
     for i in range(len(s)):
@@ -264,6 +278,9 @@ def recover_gains(car, mu, sliding, s, recover=None, probe=None):
             last = s[i]
         elif s[i] - last <= d:
             out[i] = 1.0 / (k * sliding[i]) - 1.0
+    for i in range(len(s) - 1):
+        if not slick[i] and slick[i + 1] and not held[i + 1]:
+            out[i] = mu[i] / mu[i + 1] - 1.0
     return out
 
 

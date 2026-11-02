@@ -185,3 +185,21 @@ def test_a_cut_solve_warms_the_next():
     assert cut_iterate({"ok": False, "violation": 0.3, "defect": 0.002}) is None
     assert cut_iterate({"ok": False, "violation": 0.01, "defect": 0.5}) is None
     assert cut_iterate({"ok": True, "violation": 0.0, "defect": 0.0}) is None
+
+
+def test_a_cut_solve_warms_the_next_unless_its_window_meets_ice():
+    """Issue 016: issue 005's cut warm start is withheld where the window meets ice (the rear's
+    falling branch), decided by the window, not the course: with ice anywhere on a course
+    every window elsewhere restarted from a staler plan each time (the zone chain's loose snow
+    after its ice: no plan adopted for 8 s)."""
+    import dataclasses
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0, 1200.0, ds=4.0, w=5.0)
+    ice = np.asarray(tr.s) >= 900.0
+    tr = dataclasses.replace(tr, mu=np.where(ice, 0.265, 1.12), sliding=np.where(ice, 0.7, 0.8))
+    d = Driver(c, tr, Tracker(c, tr))
+    near = d.node(900.0) - d.warm.N + 2          # its window's last nodes on the ice
+    assert d.rear_slip_low is not None            # the course has ice
+    assert d.cut_warms(0) and d.cut_warms(near - 2)
+    assert not d.cut_warms(near) and not d.cut_warms(d.node(950.0))
+    d.close()

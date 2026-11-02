@@ -269,3 +269,36 @@ def test_a_held_roads_first_metres_brake_the_rear_within_what_it_carries_sliding
             assert np.all(base[REAR_USE_ROWS] > 0.05)
             assert np.allclose(b[REAR_USE_ROWS], base[REAR_USE_ROWS], atol=1e-3)
     assert NP + 1 == gr.size1_in(2)
+
+
+def test_the_stage_arriving_at_snow_brakes_the_rear_within_the_snows_grip():
+    """Issue 016: the plant's road changes inside the stage before a snow or mud road's first
+    node and L2 eases the request across it, so a plan braking hard up to that node met the
+    snow with the asphalt's braking, all regen on the rear: it slipped and the car's ECU held
+    regen at the grip that slip showed for the whole road, where the model holds none. That
+    stage's rear braking rows take the gain mu_i / mu_i+1 - 1 (the rear within the snow's
+    grip); before a held road (ice) none (issue 013's first metres there, as before)."""
+    from race_planner.window import (NP, PROBE, RECOVER, REAR_USE_ROWS, node_functions,
+                                     recover_gains, recoverable_rear_rows)
+    c = car()
+    s = np.arange(0.0, 400.0, 4.0)
+    snow = (s >= 100) & (s < 200)
+    ice = s >= 300
+    mu = np.where(snow, 0.92 * 0.25, np.where(ice, 0.92 * 0.265, 0.92 * 1.12))
+    sl = np.where(snow, 1.0, np.where(ice, 0.7, 0.8))
+    k = recover_gains(c, mu, sl, s)
+    arrive = s == 96
+    assert np.allclose(k[arrive], 1.12 / 0.25 - 1.0)
+    first_ice = ice & (s - 296 <= PROBE)
+    assert np.allclose(k[first_ice], 1.0 / (RECOVER * 0.7) - 1.0)
+    assert np.all(k[~(arrive | first_ice)] == 0.0)   # the snow itself, before the ice, past PROBE
+    # the rows at that gain: the asphalt rear's use scaled to the snow's friction
+    _, g, _, _, _ = node_functions(c, tyres=True)
+    gr = recoverable_rear_rows(g)
+    x = [15.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    p = [0.0, 0.92 * 1.12, 0.0, 0.8, 1.0, 1.0, 0.196, 1.0]
+    u = [0.0, -3.0, -3.0, 0.0, 13.0, 15.0, 15.0]
+    base = np.asarray(g(x, u, p)).ravel()
+    b = np.asarray(gr(x, u, p + [float(k[arrive][0])])).ravel()
+    assert np.all(base[REAR_USE_ROWS] < -0.05)
+    assert np.allclose(b[REAR_USE_ROWS], base[REAR_USE_ROWS] * 1.12 / 0.25, rtol=1e-3)

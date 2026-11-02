@@ -191,14 +191,11 @@ class Driver:
         # the ECU's regen hold in the model only where a road is slick enough for it (issue 009)
         self.car = axle.regen_hold_car(self.car, self.grip * np.asarray(self.track.mu),
                                        self.track.sliding)
-        if not np.any((np.asarray(self.track.sliding) <= SLIDING_LOW)
-                      & (np.asarray(self.track.mu) <= MU_LOW)):
+        self.low = ((np.asarray(self.track.sliding) <= SLIDING_LOW)
+                    & (np.asarray(self.track.mu) <= MU_LOW))
+        if not np.any(self.low):
             self.rear_slip_low = None
         self.free_stages = FREE_STAGES
-        # a cut solve warms the next only off ice (issue 005): on the falling branch the cut
-        # iterate led the next solves further off (ice corners, single start: 6 of 12 finished
-        # with it, 10 without)
-        self.cut_warm = self.rear_slip_low is None
         slips = {"front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
                  "rear_slip_low": self.rear_slip_low, "free_stages": self.free_stages}
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
@@ -302,6 +299,15 @@ class Driver:
         """The seed processes stopped (multistart only)."""
         if self.multi is not None:
             self.multi.close()
+
+    def cut_warms(self, i0):
+        """Whether a cut solve of the window from node i0 may warm the next (issue 005): not
+        where the window meets ice (`low`, rear_slip_low's roads), where on the rear's falling
+        branch the cut iterate led the next solves further off (ice corners, single start: 6
+        of 12 finished with it, 10 without). Decided by the window, not the course: with ice
+        anywhere on it every window elsewhere restarted from a staler plan each time, cut again
+        (issue 016: the zone chain's loose snow after its ice, no plan for 8 s)."""
+        return not np.any(self.low[i0:i0 + self.warm.N])
 
     def v_end(self, i0):
         s_end = self.track.s[min(i0 + self.warm.N - 1, len(self.track.s) - 1)]
@@ -501,7 +507,7 @@ class Driver:
             src = self.plan if self.cut is None else self.cut
             Xw, Uw = warm_from(self.warm, src, i0, x0, self.track)
             new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw, mu_scale=mu)
-            self.cut = cut_iterate(new) if self.cut_warm else None
+            self.cut = cut_iterate(new) if self.cut_warms(i0) else None
             wall = new["solve_s"]
         else:                            # every seed at once; the wall time is the slowest's
             new, wall = self.multi.replan(self, i0, x0, self.v_end(i0), mu)
