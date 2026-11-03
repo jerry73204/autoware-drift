@@ -172,6 +172,30 @@ each drift. Why the last arguments are needed:
 [docs/autoware-in-a-drift.md](docs/autoware-in-a-drift.md). Tests:
 `cd src/control/drift_controller && python3 -m pytest -q test`.
 
+**Vision-only localization (swb 063, closed loop).** Pending swb 063 step 7: how
+rig_localization joins the ego stack (a second overlay, or built here) is not decided, so this
+does not run yet. What is settled is the Autoware side, in swb's profile
+(`autoware_sim_profile`): `ndt:=none` starts localization without a scan matcher (the EKF, gyro
+odometer, pose initializer, stop filter and error monitor as with NDT; the EKF reads
+`/localization/pose_estimator/pose_with_covariance`, where rig publishes), and the `_lane`
+parameter files put the error monitor's and the EKF's lateral covariance-ellipse thresholds at
+1.75 m, half a lane. Add to the `just ego-isaac` command above:
+
+```bash
+L=$PWD/install/autoware_sim_profile/share/autoware_sim_profile/config/localization
+    ndt:=none \
+    localization_error_monitor_param_path:=$L/localization_error_monitor_lane.param.yaml \
+    ekf_localizer_param_path:=$L/ekf_localizer_lane.param.yaml \
+    diagnostic_graph_path:=<drift.yaml without NDT's scan_matching_status>
+```
+
+`config/diagnostics/drift.yaml` judges NDT's `scan_matching_status`, which nothing publishes
+under `ndt:=none`, so autonomous mode would never be available; the profile's
+`check_launch_args` refuses that pair. A no-NDT copy of it (the unit and its `warn-to-ok`
+entry left out; a graph `edits: remove` cannot drop it, since that leaves the `warn-to-ok`
+with no input) comes with step 7. `ndt:=none` turns off only localization's use of the lidar;
+perception still uses it.
+
 </details>
 
 ## License
