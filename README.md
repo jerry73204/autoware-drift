@@ -186,14 +186,15 @@ L=$PWD/install/autoware_sim_profile/share/autoware_sim_profile/config/localizati
     ndt:=none \
     localization_error_monitor_param_path:=$L/localization_error_monitor_lane.param.yaml \
     ekf_localizer_param_path:=$L/ekf_localizer_lane.param.yaml \
-    diagnostic_graph_path:=<drift.yaml without NDT's scan_matching_status>
+    diagnostic_graph_path:=$D/install/drift_launch/share/drift_launch/config/diagnostics/drift_ndt_none.yaml
 ```
 
 `config/diagnostics/drift.yaml` judges NDT's `scan_matching_status`, which nothing publishes
 under `ndt:=none`, so autonomous mode would never be available; the profile's
-`check_launch_args` refuses that pair. A no-NDT copy of it (the unit and its `warn-to-ok`
-entry left out; a graph `edits: remove` cannot drop it, since that leaves the `warn-to-ok`
-with no input) comes with step 7. `ndt:=none` turns off only localization's use of the lidar;
+`check_launch_args` refuses that pair. `drift_ndt_none.yaml` is the same graph with the unit and
+its `warn-to-ok` entry left out (a graph `edits: remove` cannot drop it, since that leaves the
+`warn-to-ok` with no input); `test/test_diagnostics.py` keeps the two in step. swb 063's
+recordings (step 4) drive this way on Isaac's ground-truth pose, without the drift controller. `ndt:=none` turns off only localization's use of the lidar;
 perception still uses it.
 
 </details>

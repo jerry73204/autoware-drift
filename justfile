@@ -8,6 +8,7 @@ build:
 # The packages' own tests
 test:
     cd src/control/drift_controller && python3 -m pytest -q test
+    cd src/launcher/drift_launch && python3 -m pytest -q test
 
 clean:
     rm -rf build install log
