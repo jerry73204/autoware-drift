@@ -77,3 +77,65 @@ def test_same_rev_is_nothing_to_compare():
     assert r.returncode == 0, r.stderr
     assert "nothing to compare" in r.stdout
     assert time.time() - t0 < 5
+
+
+def test_both_raising_alike_fails():
+    x = side(gravel_sched={"error": "X", "result": None})
+    y = side(gravel_sched={"error": "X", "result": None})
+    d = regress.compare(x, y)
+    assert len(d) == 1
+    assert "gravel_sched" in d[0] and "error" in d[0] and "X" in d[0]
+
+
+def _gone(pid, within=5.0):
+    t0 = time.time()
+    while time.time() - t0 < within:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:                                  # a zombie of ours counts as gone once reaped
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return True
+        except ChildProcessError:
+            pass
+        time.sleep(0.05)
+    return False
+
+
+def test_an_interrupt_kills_the_runs_and_starts_no_more(tmp_path, monkeypatch):
+    """A fake harness (a sleeper with a grandchild in its group): an interrupt in run_side kills
+    both and never starts the queued run."""
+    import signal
+    import threading
+    fake = tmp_path / "fake_harness.py"
+    fake.write_text(
+        "import os, subprocess, sys, time\n"
+        "d = sys.argv[2]\n"
+        "c = subprocess.Popen(['sleep', '60'])\n"
+        "open(os.path.join(d, 'pids'), 'w').write(f'{os.getpid()} {c.pid}')\n"
+        "time.sleep(60)\n")
+    monkeypatch.setattr(regress, "HARNESS", str(fake))
+    dirs = [tmp_path / f"r{i}" for i in range(3)]
+    for d in dirs:
+        d.mkdir()
+    runs = [(f"r{i}", [str(d)]) for i, d in enumerate(dirs)]
+
+    def interrupt_once_started():
+        t0 = time.time()
+        while time.time() - t0 < 20:
+            if all((d / "pids").exists() for d in dirs[:2]):
+                break
+            time.sleep(0.05)
+        os.kill(os.getpid(), signal.SIGINT)   # a real SIGINT, as Ctrl-C sends
+
+    threading.Thread(target=interrupt_once_started, daemon=True).start()
+    t0 = time.time()
+    import pytest
+    with pytest.raises(KeyboardInterrupt):
+        regress.run_side(runs, None, str(tmp_path / "out"), jobs=2)
+    assert time.time() - t0 < 20
+    for d in dirs[:2]:
+        for pid in map(int, (d / "pids").read_text().split()):
+            assert _gone(pid), f"pid {pid} outlived the interrupt"
+    assert not (dirs[2] / "pids").exists(), "a queued run started after the interrupt"

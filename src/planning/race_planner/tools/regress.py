@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import yaml
@@ -102,7 +103,39 @@ def _last_line(text):
     return lines[-1].strip() if lines else ""
 
 
-def run_one(key, argv, rp_root, out_dir):
+class _Live:
+    """The process groups a side has started, so an interrupt can kill them: each run is in
+    its own session (start_new_session), where a terminal's SIGINT never reaches it."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.procs = set()
+        self.stopped = False
+
+    def start(self, *a, **kw):
+        with self.lock:
+            if self.stopped:
+                raise KeyboardInterrupt("the side was interrupted")
+            p = subprocess.Popen(*a, **kw)
+            self.procs.add(p)
+            return p
+
+    def done(self, p):
+        with self.lock:
+            self.procs.discard(p)
+
+    def kill_all(self):
+        with self.lock:
+            self.stopped = True
+            for p in self.procs:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def run_one(key, argv, rp_root, out_dir, live=None):
+    live = live or _Live()
     out = os.path.join(out_dir, key)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
@@ -113,9 +146,9 @@ def run_one(key, argv, rp_root, out_dir):
     if rp_root:
         env["RP_ROOT"] = rp_root
     t0 = time.time()
-    p = subprocess.Popen([sys.executable, HARNESS, "run", *argv], env=env, cwd=PKG,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         start_new_session=True)
+    p = live.start([sys.executable, HARNESS, "run", *argv], env=env, cwd=PKG,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                   start_new_session=True)
     try:
         _, err = p.communicate(timeout=RUN_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -123,6 +156,8 @@ def run_one(key, argv, rp_root, out_dir):
         p.communicate()
         return dict({f: None for f in FIELDS}, error=f"timeout after {RUN_TIMEOUT} s",
                     wall=round(time.time() - t0, 1))
+    finally:
+        live.done(p)
     wall = round(time.time() - t0, 1)
     o = {f: None for f in FIELDS}
     o["wall"] = wall
@@ -143,13 +178,22 @@ def run_one(key, argv, rp_root, out_dir):
 def run_side(runs, rp_root, out_dir, jobs=2, label=""):
     """{key: Outcome}: each run in its own subprocess, `jobs` at a time."""
     res = {}
-    with cf.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
-        fut = {ex.submit(run_one, k, a, rp_root, out_dir): k for k, a in runs}
+    live = _Live()
+    ex = cf.ThreadPoolExecutor(max_workers=max(1, jobs))
+    try:
+        fut = {ex.submit(run_one, k, a, rp_root, out_dir, live): k for k, a in runs}
         for f in cf.as_completed(fut):
             k = fut[f]
             res[k] = f.result()
             print(f"  [{label}] {k}: {res[k]['result'] or res[k]['error']} "
                   f"({res[k]['wall']} s)", file=sys.stderr, flush=True)
+    except BaseException:
+        # Ctrl-C (or a run raising): no queued run starts, every started one's process group
+        # dies, and the threads are joined before the caller removes the worktree under them
+        live.kill_all()
+        ex.shutdown(wait=True, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
     return {k: res[k] for k, _ in runs}
 
 
@@ -220,13 +264,20 @@ def _show(f, v):
 
 
 def compare(head, base):
-    """One string per run that differs, naming the run and both values; [] is a pass."""
+    """One string per run that differs, naming the run and both values; [] is a pass. A run
+    that raised on either side is never a pass, even when both raised alike: the error is the
+    gate's (a broken venv, an import error in the shared harness), not a planner result."""
     out = []
     for k in list(head) + [k for k in base if k not in head]:
         if k not in head or k not in base:
             out.append(f"{k}: only on the {'head' if k in head else 'base'} side")
             continue
         h, b = head[k], base[k]
+        if h.get("error") is not None or b.get("error") is not None:
+            out.append(f"{k}: error, the run raised: head={h.get('error')!r} "
+                       f"(result {h.get('result')!r}) base={b.get('error')!r} "
+                       f"(result {b.get('result')!r})")
+            continue
         diffs = [f"{f} head={_show(f, h.get(f))} base={_show(f, b.get(f))}"
                  for f in FIELDS if h.get(f) != b.get(f)]
         if diffs:
