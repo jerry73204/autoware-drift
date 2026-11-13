@@ -6,6 +6,7 @@ import os
 import types
 
 import numpy as np
+import pytest
 
 from race_planner import modes
 from race_planner.car import Car
@@ -17,6 +18,7 @@ from test_ocp import SPEC, road
 
 SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
 CLASSES = os.path.join(SWB, "src/swb_isaac_world/config/surface_classes.yaml")
+HARUNA = os.path.join(SWB, "data/courses/haruna")
 
 
 def table():
@@ -71,9 +73,10 @@ def test_the_planned_friction_is_the_mixtures_lower_quantile():
     assert abs(m2.friction(np.array([5.0]))[2][0] - tab.mu("ice", c)) < 1e-12
 
 
+@pytest.mark.skipif(not os.path.isdir(HARUNA), reason="Haruna's course data is not here")
 def test_a_certain_map_gives_the_planner_the_track_060_plans_on():
     tab, c = table(), car()
-    t = Track.from_swb_course(os.path.join(SWB, "data/courses/haruna"), tab, c)
+    t = Track.from_swb_course(HARUNA, tab, c)
     p = SurfaceMap(tab, c).planner_track(t)
     for k in ("mu", "sliding", "stiff_long", "stiff_lat", "peak_long", "peak_lat"):
         assert np.array_equal(getattr(p, k), getattr(t, k)), k

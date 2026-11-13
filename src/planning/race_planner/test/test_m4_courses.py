@@ -12,13 +12,18 @@ from race_planner.serve import PlanIds, plan_message
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "studies"))
 import mode_choice_m4 as m4  # noqa: E402
 
+SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
+HARUNA = os.path.join(SWB, "data/courses/haruna")
+
 
 @pytest.fixture(scope="module")
 def car():
     return Car.from_spec(m4.e1.SPEC)
 
 
-@pytest.mark.parametrize("name", ["haruna@snow_packed", "zones@gravel"])
+@pytest.mark.parametrize("name", [pytest.param("haruna@snow_packed",
+                 marks=pytest.mark.skipif(not os.path.isdir(HARUNA), reason="Haruna's course data is not here")),
+    "zones@gravel"])
 def test_a_one_class_course_is_that_class_everywhere(car, name):
     cls = name.split("@")[1]
     tab = m4.table()
@@ -30,6 +35,7 @@ def test_a_one_class_course_is_that_class_everywhere(car, name):
     assert set(smap.true_class(world.s)) == {cls}
 
 
+@pytest.mark.skipif(not os.path.isdir(HARUNA), reason="Haruna's course data is not here")
 def test_a_one_class_course_keeps_the_dry_geometry(car):
     dry, *_ = m4.course("haruna", car)
     snow, *_ = m4.course("haruna@snow_packed", car)
