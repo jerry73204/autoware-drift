@@ -46,3 +46,32 @@ def test_missing_swb_stops_before_running():
     r = _cli({"SWB": "/nonexistent"})
     assert r.returncode == 2
     assert "/nonexistent" in r.stderr
+
+
+def _run_stubbed(monkeypatch, tmp_path, cpus):
+    import types
+    seen = {}
+
+    def fake_run(name, **kw):
+        seen.update(kw)
+        return {"result": "done", "t": 1.0, "solve_all": [0.1]}
+
+    stub = types.ModuleType("mode_choice_m4")
+    stub.run = fake_run
+    monkeypatch.setitem(sys.modules, "mode_choice_m4", stub)
+    monkeypatch.setattr(os, "sched_setaffinity", lambda *a: None)
+    monkeypatch.setenv("SWB", str(tmp_path))
+    monkeypatch.delenv("RP_DET", raising=False)
+    monkeypatch.setenv("M4_OUT", str(tmp_path))
+    rc = bench_live.main(["run", "--courses", "c:gravel:15:90:8", "--arm", "sched", "--cpus", cpus,
+                          "--label", "t", "--out", str(tmp_path / "out")])
+    assert rc == 0
+    return seen
+
+
+def test_main_core_is_not_given_to_the_seed_workers(monkeypatch, tmp_path):
+    assert _run_stubbed(monkeypatch, tmp_path, "8,9,10,11")["cpus"] == [9, 10, 11]
+
+
+def test_single_core_list_leaves_workers_unpinned(monkeypatch, tmp_path):
+    assert _run_stubbed(monkeypatch, tmp_path, "8")["cpus"] is None

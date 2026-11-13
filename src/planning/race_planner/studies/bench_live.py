@@ -99,7 +99,7 @@ def _bench(a):
     try:
         for name in [c for c in a.courses.split(",") if c]:
             del l2[:]
-            res = m4.run(name, arm=a.arm, cpus=cpus, tag=a.label)
+            res = m4.run(name, arm=a.arm, cpus=cpus[1:] or None, tag=a.label)  # [1:]: the seed workers' cores, as m4's driver; cpus[0] is this process's
             l1 = res.get("solve_all") or []
             per[name] = {**summarise(l1, l2, BUDGET, TICK), "result": res.get("result"),
                          "t": res.get("t")}
