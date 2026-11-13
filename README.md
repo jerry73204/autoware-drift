@@ -199,6 +199,29 @@ perception still uses it.
 
 </details>
 
+## Before pushing to main
+
+Before every push to `main`, run the regression gate, and the suite:
+
+```bash
+export SWB=~/repos/scenario-world-bridge     # the harness reads swb's car and surface classes
+just regress-check                           # race_planner here against origin/main
+just test                                    # and race_planner's pytest line under "Try it"
+```
+
+`just regress-check` drives a fixed set of runs
+(`src/planning/race_planner/tools/regress_set.yaml`: synthetic corners on asphalt, gravel,
+packed snow and wet mud, and a misdeclared zone chain) under `RP_DET=1`, once with
+race_planner as it stands here and once with `origin/main`'s (a temporary `git worktree`; both
+through this checkout's `studies/` harness). It prints one line per run with both sides' plan
+and trajectory digests, and exits 1 if any run's result, time or digests differ (2 on a setup
+error, such as no `$SWB`). `base=<rev>` compares against another revision. The base side's
+results are cached under `~/.cache/race_planner/regress/`, so a second check runs only this
+side. `just regress` prints this checkout's outcomes alone.
+
+A change meant to alter results says so in its commit message and in the PR's description,
+naming the runs that moved. Any other difference is a regression.
+
 ## License
 
 Apache-2.0.

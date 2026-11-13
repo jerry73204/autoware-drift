@@ -1,0 +1,12 @@
+# The regression gate's runs (tools/regress.py): studies/mode_choice_m4.py `run` arguments,
+# each with --digest added, under RP_DET=1. drift_mustang at full size, synthetic courses
+# only (c:<class>:<R>:<turn deg>:<width m>[:<entry m>], zones), so no swb course data is
+# needed. Changing this file changes what the gate compares; the base side's cache is keyed
+# by it.
+runs:
+  asphalt_single: "c:asphalt:25:90:8 --arm single"
+  gravel_sched: "c:gravel:15:90:8 --arm sched"
+  gravel_hairpin_always: "c:gravel:15:180:8:160 --arm always --force-drift"
+  snow_packed_sched: "c:snow_packed:25:90:15 --arm sched"
+  mud_perc_est: "c:mud_wet:25:90:8:100 --arm sched --perc --est"
+  zones_err: "zones --arm sched --err 10 --seed 1"
