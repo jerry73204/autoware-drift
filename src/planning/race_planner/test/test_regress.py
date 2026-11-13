@@ -1,5 +1,6 @@
 """The regression gate (tools/regress.py): its comparison and its CLI's cheap exits. No solver
 runs here; the gate itself is proved by `just regress-check` (README, "Before pushing to main")."""
+import json
 import os
 import subprocess
 import sys
@@ -139,3 +140,22 @@ def test_an_interrupt_kills_the_runs_and_starts_no_more(tmp_path, monkeypatch):
         for pid in map(int, (d / "pids").read_text().split()):
             assert _gone(pid), f"pid {pid} outlived the interrupt"
     assert not (dirs[2] / "pids").exists(), "a queued run started after the interrupt"
+
+
+def test_a_truncated_cache_entry_is_a_miss(tmp_path):
+    runs = [("asphalt_single", ["x"]), ("gravel_sched", ["y"])]
+    (tmp_path / "asphalt_single.json").write_text('{"result": "do')     # cut mid-write
+    (tmp_path / "gravel_sched.json").write_text(json.dumps(outcome()))
+    got = regress._cached(str(tmp_path), runs)
+    assert list(got) == ["gravel_sched"]
+
+
+def test_store_leaves_no_partial_file(tmp_path, monkeypatch):
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(regress.json, "dump", boom)
+    try:
+        regress._store(str(tmp_path), {"asphalt_single": outcome()})
+    except OSError:
+        pass
+    assert not (tmp_path / "asphalt_single.json").exists()

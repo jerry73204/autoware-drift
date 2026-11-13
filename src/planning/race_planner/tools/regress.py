@@ -219,9 +219,11 @@ def _cached(cdir, runs):
     got = {}
     for k, _ in runs:
         f = os.path.join(cdir, k + ".json")
-        if os.path.isfile(f):
+        try:
             with open(f) as fh:
                 got[k] = json.load(fh)
+        except (OSError, ValueError):     # absent, or cut short by an earlier crash: a miss
+            pass
     return got
 
 
@@ -229,8 +231,15 @@ def _store(cdir, outs):
     os.makedirs(cdir, exist_ok=True)
     for k, o in outs.items():
         if o.get("error") is None:          # a failure may be the host's: never cached
-            with open(os.path.join(cdir, k + ".json"), "w") as fh:
-                json.dump(o, fh)
+            f = os.path.join(cdir, k + ".json")
+            fd, tmp = tempfile.mkstemp(dir=cdir, prefix=k + ".", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(o, fh)
+                os.replace(tmp, f)          # whole or not at all: a reader never sees half
+            except BaseException:
+                os.unlink(tmp)
+                raise
 
 
 def run_rev(runs, sha, root, tmp, jobs):

@@ -10,10 +10,13 @@ sim.Plant drives) with the wall clock ON and reports the two layers' solve times
 
 Run:  SWB=<swb checkout> env -u PYTHONPATH .venv/bin/python studies/bench_live.py run
           --courses c:asphalt:25:90:8,c:gravel:15:90:8,zones --arm sched --cpus 8,9,10,11
-          --label NAME --out DIR
-Writes DIR/<label>.json = {host, label, per_course, all}. Refuses RP_DET=1 (that run has no clock).
+          --label NAME --out DIR [--length M] [--budget S]
+Writes DIR/<label>.json = {host, label, length, budget, per_course, all}. Refuses RP_DET=1 (that run
+has no clock). --length and --budget are live.Driver's `length` (L1's window, m; default the
+Driver's) and `budget` (L1's re-plan budget and period, s), set on the Driver m4.run builds.
 """
 import argparse
+import glob
 import json
 import os
 import platform
@@ -46,15 +49,42 @@ def summarise(l1, l2, budget, tick):
     return {**_stats("l1", l1, budget), **_stats("l2", l2, tick)}
 
 
-def _first_line(argv):
+def _read_int(path):
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+        with open(path) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
         return None
-    if r.returncode != 0:
+
+
+def _freqs(d, names):
+    got = {k: _read_int(os.path.join(d, f)) for k, f in zip(("min", "max", "cur"), names)}
+    return got if any(v is not None for v in got.values()) else None
+
+
+def _pinned(table):
+    if not table:
         return None
-    out = r.stdout.strip()
-    return out.splitlines()[0] if out else None
+    return all(v["min"] is not None and v["min"] == v["max"] for v in table.values())
+
+
+def clocks(root="/"):
+    """CPU and GPU clock ranges from sysfs, readable without root (jetson_clocks --show is not).
+    jetson_clocks pins by raising the floor to the ceiling, so *_pinned is min == max on every
+    policy / GPU devfreq node. cpu: kHz per cpufreq policy; gpu: Hz per devfreq node named *gpu*.
+    A missing tree is None."""
+    cpu = {}
+    for d in sorted(glob.glob(os.path.join(root, "sys/devices/system/cpu/cpufreq/policy*"))):
+        f = _freqs(d, ("scaling_min_freq", "scaling_max_freq", "scaling_cur_freq"))
+        if f:
+            cpu[os.path.basename(d)] = f
+    gpu = {}
+    for d in sorted(glob.glob(os.path.join(root, "sys/class/devfreq/*gpu*"))):
+        f = _freqs(d, ("min_freq", "max_freq", "cur_freq"))
+        if f:
+            gpu[os.path.basename(d)] = f
+    cpu, gpu = cpu or None, gpu or None
+    return {"cpu": cpu, "gpu": gpu, "cpu_pinned": _pinned(cpu), "gpu_pinned": _pinned(gpu)}
 
 
 def host():
@@ -71,7 +101,7 @@ def host():
         pass
     return {"machine": platform.machine(), "cpu_count": os.cpu_count(),
             "loadavg": list(os.getloadavg()), "nvpmodel": nv,
-            "jetson_clocks": _first_line(["jetson_clocks", "--show"]),
+            "clocks": clocks(),
             "python": platform.python_version(), "casadi": cas}
 
 
@@ -81,9 +111,16 @@ def _bench(a):
     sys.path.insert(0, HERE)
     import mode_choice_m4 as m4
     from race_planner.tracker import Tracker
-    cpus = [int(x) for x in a.cpus.split(",") if x] or None
+    cpus = [int(x) for x in (a.cpus or "").split(",") if x] or None
     if cpus:
         os.sched_setaffinity(0, {cpus[0]})
+    over = {k: v for k, v in (("length", a.length), ("budget", a.budget)) if v is not None}
+    budget = a.budget if a.budget is not None else BUDGET
+    orig_driver = getattr(m4, "Driver", None)
+    if over and orig_driver is not None:
+        def driver(*args, **kw):      # m4.run builds its Driver from this module global
+            return orig_driver(*args, **{**kw, **over})
+        m4.Driver = driver
     l2 = []
     orig = Tracker.step
 
@@ -99,16 +136,19 @@ def _bench(a):
     try:
         for name in [c for c in a.courses.split(",") if c]:
             del l2[:]
-            res = m4.run(name, arm=a.arm, cpus=cpus[1:] or None, tag=a.label)  # [1:]: the seed workers' cores, as m4's driver; cpus[0] is this process's
+            # [1:]: the seed workers' cores, as m4's driver; cpus[0] is this process's
+            res = m4.run(name, arm=a.arm, cpus=(cpus[1:] or None) if cpus else None, tag=a.label)
             l1 = res.get("solve_all") or []
-            per[name] = {**summarise(l1, l2, BUDGET, TICK), "result": res.get("result"),
+            per[name] = {**summarise(l1, l2, budget, TICK), "result": res.get("result"),
                          "t": res.get("t")}
             all1 += l1
             all2 += l2
     finally:
         Tracker.step = orig
-    out = {"host": host(), "label": a.label, "per_course": per,
-           "all": summarise(all1, all2, BUDGET, TICK)}
+        if over and orig_driver is not None:
+            m4.Driver = orig_driver
+    out = {"host": host(), "label": a.label, "length": a.length, "budget": budget,
+           "per_course": per, "all": summarise(all1, all2, budget, TICK)}
     path = os.path.join(a.out, a.label + ".json")
     with open(path, "w") as fh:
         json.dump(out, fh, indent=1)
@@ -123,6 +163,10 @@ def main(argv=None):
     r.add_argument("--courses", required=True, help="comma list of m4 course names")
     r.add_argument("--arm", default="sched")
     r.add_argument("--cpus", default="")
+    r.add_argument("--length", type=float, default=None,
+                   help="L1's window length, m (live.Driver.length; default the Driver's 200)")
+    r.add_argument("--budget", type=float, default=None,
+                   help=f"L1's re-plan budget and period, s (live.Driver.budget; default {BUDGET})")
     r.add_argument("--label", required=True)
     r.add_argument("--out", required=True)
     a = ap.parse_args(argv)
