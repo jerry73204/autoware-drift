@@ -248,8 +248,9 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
         ok, get = True, sol.value
     except RuntimeError:
         ok, get = False, opti.debug.value
-    return (ok, opti.stats()["return_status"], np.asarray(get(X)).reshape(6, N),
-            np.asarray(get(U)).reshape(7, M))
+    st = opti.stats()
+    return (ok, st["return_status"], np.asarray(get(X)).reshape(6, N),
+            np.asarray(get(U)).reshape(7, M), int(st.get("iter_count", -1)))
 
 
 def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False,
@@ -259,7 +260,8 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
     the controls), ok, status, time and violation (the worst of each constraint and where), and
-    the solver's own X (6 x N) and U (7 x M), to warm-start another solve from.
+    the solver's own X (6 x N) and U (7 x M), to warm-start another solve from, and iters (IPOPT's
+    iterations per solve).
     grip: the share of the road's friction the plan may use (1: all of it); below 1 it leaves a
     tracker room for what the model gets wrong at the limit.
     beta_max, rear_alpha_max: the body's sideslip, the rear axle's slip angle, held within it
@@ -288,17 +290,18 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     P = np.vstack([track.kappa, grip * track.mu, track.grade, track.sliding,
                    track.stiff_long, track.stiff_lat, track.peak_long, track.peak_lat])
     X0, U0 = _warm_start(track, car, margin, v_start) if warm is None else warm
-    ok, status, Xv, Uv = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
+    ok, status, Xv, Uv, it = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
                                 max_iter, verbose, 0.0, beta_max, rear_alpha_max, fast)
-    stages = [status]
+    stages, iters = [status], [it]
     if free_only:
         g, lbg, ubg = g_free, lo, hi
     for w_both in (() if free_only else W_BOTH):
         if not ok:
             break
-        ok, status, Xv, Uv = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
+        ok, status, Xv, Uv, it = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
                                     max_iter, verbose, w_both, beta_max, rear_alpha_max, fast)
         stages.append(status)
+        iters.append(it)
     vx, vy, r, n, xi, delta = Xv
     sdot = (vx * np.cos(xi) - vy * np.sin(xi)) / (1 - n * track.kappa)
     seg = np.array([float(_rk4(f, Xv[:, k], Uv[:, k], P[:, k], h[k])[1]) for k in range(M)])
@@ -314,7 +317,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     violation = {"defect": (float(defect.max()), float(s[int(defect.argmax())]))}
     for i, name in enumerate(FREE_ROWS if free_only else PATH_ROWS):
         violation[name] = (float(over[:, i].max()), float(s[int(over[:, i].argmax())]))
-    return {"ok": ok, "violation": violation, "status": status, "stages": stages, "time": float(np.sum(seg)),
+    return {"ok": ok, "violation": violation, "status": status, "stages": stages, "iters": iters, "time": float(np.sum(seg)),
             "s": s, "t": t,
             "n": n, "xi": xi, "vx": vx, "vy": vy, "r": r, "delta": delta,
             "beta": np.arctan2(vy, vx), "sdot": sdot,
