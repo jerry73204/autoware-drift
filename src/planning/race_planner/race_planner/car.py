@@ -30,6 +30,19 @@ Only what the spec says goes in; nothing is per track. Derived quantities:
   (lateral: lat_stiff_value N/rad per N of rest load, up to lat_stiff_max_load rest loads;
   longitudinal: long_stiff_value per g) and its friction-vs-slip curve. How these become a
   tyre model is model.py's business.
+
+Optional, for a car whose spec carries them (none of drift_mustang's; each off by default, so a
+car without them is modelled as before):
+
+- `aero` (a downforce car; sim_vehicle_spec v2 has no such section yet, FastSlowRR's F1 spec
+  adds it): downforce, 1/2 rho Cl A (N per (m/s)^2), split between the axles by `front_share`;
+  drag_height, the drag's height over the ground (centre_of_pressure.z; it pitches the car
+  nose-up by drag x (drag_height - h_cg) / wheel_base).
+- `tire_model` (a tyre rewritten every step, as FastSlowRR's Isaac F1 car's is):
+  `peak_slip` and `peak_slip_angle_deg`, where the tyre peaks at every load (its stiffnesses
+  follow mu(Fz) Fz: 3 mu Fz / peak, PhysX's brush), and `load_sensitivity`: the peak mu at two
+  reference loads per axle, linear between and beyond them (fastest-lap's, floor 0.3), as
+  shares of `mu` (mu_load). The spec's `tires.friction` is the front's mu at rest load.
 """
 from dataclasses import dataclass
 import math
@@ -76,6 +89,11 @@ class Car:
     est_mu_recover_rate: float = 0.1  # 1/s: the ECU's friction estimate's recovery away from the
     # limit (sim_vehicle_ecu's estimator; a calibration default, the spec does not set it)
     regen_grip_share: float = REGEN_GRIP_SHARE   # the ECU's regen slip control's hold (009)
+    downforce: float = 0.0          # 1/2 rho Cl A, N per (m/s)^2 (the spec's `aero`; 0: none)
+    aero_front_share: float = 0.5   # the downforce's share on the front axle
+    drag_height: float = None       # the drag's height over the ground; None: h_cg (no pitch)
+    tyre_peaks: tuple = None        # (kappa_p, tan alpha_p) at every load; None: PhysX's graphs
+    mu_load: tuple = None           # ((Fz1, Fz2), (front at each), (rear at each)), shares of mu
 
     def __post_init__(self):
         if self.transfer_height is None:
@@ -107,6 +125,22 @@ class Car:
         grip_share = (float(rsc.get("grip_share", REGEN_GRIP_SHARE))
                       if rsc.get("enabled", True) else None)
         r = d["resistance"]
+        extra = {}
+        a = d.get("aero")
+        if a:
+            extra.update(downforce=0.5 * float(a["air_density"]) * float(a["lift_coefficient"])
+                         * float(a["frontal_area"]), aero_front_share=float(a["front_share"]),
+                         drag_height=float(a["centre_of_pressure"]["z"]))
+        tm = d.get("tire_model")
+        if tm:
+            extra["tyre_peaks"] = (float(tm["peak_slip"]),
+                                   math.tan(math.radians(float(tm["peak_slip_angle_deg"]))))
+            ls = tm.get("load_sensitivity")
+            if ls:
+                mu0 = float(t["friction"])
+                extra["mu_load"] = (tuple(map(float, ls["reference_loads"])),
+                                    tuple(float(v) / mu0 for v in ls["front"]),
+                                    tuple(float(v) / mu0 for v in ls["rear"]))
         return cls(
             name=d["name"], m=float(i["mass"]), Iz=float(i["mass"]) * (l * l + w * w) / 12.0,
             lf=lf, lr=wb - lf, h_cg=float(i["com_height"]), track=float(g["wheel_tread"]),
@@ -126,4 +160,4 @@ class Car:
             wheel_mass=float(d.get("wheels", {}).get("mass", 20.0)),
             wheel_damping=float(d.get("wheels", {}).get("damping_rate", 0.25)),
             regen_fade=tuple(float(v) for v in p.get("regen_fade_speeds", (1.0, 3.0))),
-            regen_grip_share=grip_share)
+            regen_grip_share=grip_share, **extra)

@@ -35,6 +35,13 @@ and the quasi-static transfer from the body's accelerations over the car's trans
 lateral over the track, each axle its static share; the spec's suspension is the same on both
 axles and has no anti-roll bars).
 
+A downforce car (car.downforce > 0) adds 1/2 rho Cl A vx^2 to the loads, split by
+aero_front_share, and the drag's pitch about the CoM when it acts above it (car.drag_height). A
+car with mu_load has each wheel's mu scaled by its axle's share at its load (fastest-lap's
+linear load sensitivity); one with tyre_peaks has its tyre peak at those slips at every load
+(the stiffnesses 3 mu Fz / peak, as FastSlowRR's Isaac F1 car rewrites them each step), in
+place of PhysX's stiffness graphs.
+
 The wheels' spin is not a state: each wheel's peripheral speed (omega R, m/s) is an input, so a
 wheel's slip is set directly and its torque is what the tyre's force asks of it (T = Fx R; the
 wheel's inertia is left out, 22 kg at R 0.32 is a few milliseconds). The minimum-time problem
@@ -70,6 +77,8 @@ def peaks(car):
     """The rig's peak slips at its tyre's friction: (kappa_p, tan alpha_p), swb's rule
     (surface_layer.rig_peaks at friction 1.0, times the tyre's friction as
     WheelSurfaces.class_peaks takes them for a class with none of its own)."""
+    if car.tyre_peaks is not None:
+        return tuple(car.tyre_peaks)
     load = car.m * G / 4
     return (PEAK_SPAN * load / (STIFFNESS_IN_USE * car.long_stiff_value * G) * car.mu,
             PEAK_SPAN / (STIFFNESS_IN_USE * car.lat_stiff_value) * car.mu)
@@ -86,10 +95,14 @@ def tyre(car, kappa, tan_alpha, fz, fz0, mu, sliding=1.0, surface=None):
     rho = ca.sqrt((kappa / kp) ** 2 + (tan_alpha / tp) ** 2 + 1e-12)
     z = KNEE * (rho - 1.0)                 # softplus, in its overflow-free form
     rho = 1.0 + (ca.fmax(z, 0.0) + ca.log(1.0 + ca.exp(-ca.fabs(z)))) / KNEE
+    if car.tyre_peaks is not None:          # the peak where it is at every load: brush, 3 mu Fz
+        c_lon = 3.0 * mu * ca.fmax(fz, 1.0) / kp
+        c_lat = 3.0 * mu * ca.fmax(fz, 1.0) / tp
+    else:
+        load = ca.fmin(3.0 * fz / (fz0 * car.lat_stiff_max_load), 3.0)
+        c_lat = fz0 * car.lat_stiff_value * (load - load * load / 3.0 + load ** 3 / 27.0)
+        c_lon = car.long_stiff_value * G
     mu = mu * (sliding + (1.0 - sliding) / rho)
-    load = ca.fmin(3.0 * fz / (fz0 * car.lat_stiff_max_load), 3.0)
-    c_lat = fz0 * car.lat_stiff_value * (load - load * load / 3.0 + load ** 3 / 27.0)
-    c_lon = car.long_stiff_value * G
     if surface is not None:
         c_lon, c_lat = c_lon * s_lon, c_lat * s_lat
     sx, sy = c_lon * kappa, c_lat * tan_alpha
@@ -114,16 +127,33 @@ def wheels(car):
     return [(car.lf, h), (car.lf, -h), (-car.lr, h), (-car.lr, -h)]
 
 
-def loads(car, ax, ay):
-    """Each wheel's load (N) under the body's accelerations ax, ay (m/s^2)."""
+def loads(car, ax, ay, vx=None):
+    """Each wheel's load (N) under the body's accelerations ax, ay (m/s^2), and at speed vx
+    (m/s) a downforce car's aerodynamic loads (None: none)."""
     L, t, h, m = car.wheel_base, car.track, car.transfer_height, car.m
     st = rest_loads(car)
     dlon = m * ax * h / L / 2.0                       # per wheel, from the front to the rear
+    if car.downforce and vx is not None:
+        q = vx * vx
+        df = car.downforce * q / 2.0                  # per wheel pair, split by the axles
+        st = [st[0] + df * car.aero_front_share, st[1] + df * car.aero_front_share,
+              st[2] + df * (1.0 - car.aero_front_share), st[3] + df * (1.0 - car.aero_front_share)]
+        if car.drag_height is not None:
+            dlon = dlon + car.drag * q * (car.drag_height - h) / L / 2.0
     share_f, share_r = car.lr / L, car.lf / L
     dlat_f = m * ay * h / t * share_f                 # per axle, from the right to the left
     dlat_r = m * ay * h / t * share_r
     return [st[0] - dlon - dlat_f, st[1] - dlon + dlat_f,
             st[2] + dlon - dlat_r, st[3] + dlon + dlat_r]
+
+
+def mu_share(car, front, fz):
+    """A wheel's mu at load fz as a share of the car's (mu_load's line; 1 with none)."""
+    if car.mu_load is None:
+        return 1.0
+    (f1, f2), mf, mr = car.mu_load
+    m1, m2 = mf if front else mr
+    return ca.fmax(m1 + (m2 - m1) * (fz - f1) / (f2 - f1), 0.3 / car.mu)   # fastest-lap floor, mu 0.3
 
 
 def dynamics(car, x, u, mu, acc, sliding=1.0, surface=None):
@@ -148,7 +178,7 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, surface=None):
     sls = sliding if isinstance(sliding, (list, tuple)) else [sliding] * 4
     dl, dr_ = ackermann(car, delta)
     steer = [dl, dr_, 0.0, 0.0]
-    fz = loads(car, acc[0], acc[1])
+    fz = loads(car, acc[0], acc[1], vx if car.downforce else None)
     fz0 = rest_loads(car)
     Fx = Fy = Mz = 0.0
     out = {k: [] for k in ("torque", "kappa", "alpha", "fx", "fy")}
@@ -159,7 +189,8 @@ def dynamics(car, x, u, mu, acc, sliding=1.0, surface=None):
         speed = ca.sqrt(lx * lx + 1e-4)
         kappa = (w[i] - lx) / (speed + SLIP_LONG_OFFSET)
         tan_a = ly / (speed + SLIP_LAT_OFFSET)
-        fx, fy = tyre(car, kappa, tan_a, fz[i], fz0[i], mus[i], sls[i], surface)
+        mu_i = mus[i] if car.mu_load is None else mus[i] * mu_share(car, i < 2, ca.fmax(fz[i], 1.0))
+        fx, fy = tyre(car, kappa, tan_a, fz[i], fz0[i], mu_i, sls[i], surface)
         bx, by = c * fx - s * fy, s * fx + c * fy         # back to the body
         Fx, Fy = Fx + bx, Fy + by
         Mz = Mz + px * by - py * bx

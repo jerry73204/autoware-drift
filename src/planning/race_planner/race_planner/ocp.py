@@ -43,6 +43,8 @@ X_SCALE = np.array([20.0, 2.0, 1.0, 3.0, 0.3, 0.3])
 U_SCALE = np.array([1.0, 20.0, 20.0, 20.0, 20.0, 10.0, 10.0])
 PATH_ROWS = ("ax", "ay", "diff", "front_pair", "brake", "brake_max", "drive", "power", "both",
              "fz_fl", "fz_fr", "fz_rl", "fz_rr", "sdot", "k_fl", "k_fr", "k_rl", "k_rr")
+FREE_ROWS = ("ax", "ay", "diff", "t_fl", "t_fr", "t_rl", "t_rr", "drive", "power",
+             "fz_fl", "fz_fr", "fz_rl", "fz_rr", "sdot", "k_fl", "k_fr", "k_rl", "k_rr")
 # braking and driving at once: an exact penalty on drive x brake demand, s per (N m)^2 and m (a
 # constraint of it is a complementarity, which IPOPT's restoration does not get through), raised
 # solve by solve from the last one's solution. The car cannot do both: its vehicle interface asks
@@ -203,7 +205,7 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
 
 
 def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False,
-                   grip=1.0, beta_max=None, rear_alpha_max=None, warm=None):
+                   grip=1.0, beta_max=None, rear_alpha_max=None, warm=None, free_only=False):
     """The minimum-time trajectory along `track` for `car`. Open tracks start at v_start (m/s,
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
@@ -214,7 +216,9 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     beta_max, rear_alpha_max: the body's sideslip, the rear axle's slip angle, held within it
     (rad) at every node; None leaves it free (a study's: how much slower a plan held to grip
     driving is). warm: (X, U) to start from (another
-    solve's), the minimum-curvature line's otherwise.
+    solve's), the minimum-curvature line's otherwise. free_only: the first solve alone, each
+    wheel's torque free within its brake and the motor (a car whose brakes are modulated per
+    wheel, not split by sim_vehicle_ecu's distribution: FastSlowRR's Isaac F1 car).
 
     Solves in turn: first with each wheel's torque free within its brake and the motor, from the
     minimum-curvature line's warm start; then the car's own, from that, once per W_BOTH. Started cold, the brake system's coupling
@@ -235,7 +239,9 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     ok, status, Xv, Uv = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
                                 max_iter, verbose, 0.0, beta_max, rear_alpha_max)
     stages = [status]
-    for w_both in W_BOTH:
+    if free_only:
+        g, lbg, ubg = g_free, lo, hi
+    for w_both in (() if free_only else W_BOTH):
         if not ok:
             break
         ok, status, Xv, Uv = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
@@ -254,7 +260,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     gv = np.array([np.asarray(g(Xv[:, k], Uv[:, k], P[:, k])).ravel() for k in range(M)])
     over = np.maximum(gv - np.array(ubg), np.array(lbg) - gv)
     violation = {"defect": (float(defect.max()), float(s[int(defect.argmax())]))}
-    for i, name in enumerate(PATH_ROWS):
+    for i, name in enumerate(FREE_ROWS if free_only else PATH_ROWS):
         violation[name] = (float(over[:, i].max()), float(s[int(over[:, i].argmax())]))
     return {"ok": ok, "violation": violation, "status": status, "stages": stages, "time": float(np.sum(seg)),
             "s": s, "t": t,

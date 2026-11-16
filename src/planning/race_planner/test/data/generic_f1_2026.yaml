@@ -1,0 +1,300 @@
+# The generic 2026 F1 car, sim_vehicle_spec v2 (swb's vehicle format) plus `aero` and
+# `tire_model` sections (read by autoware-drift's race_planner). Written by `circuitgen spec`
+# (circuitgen/vehicle_spec.py) from the numbers the Isaac car uses; edit those, not this
+# file. FastSlowRR roadmap 003 R2.
+spec_version: 2
+name: generic_f1_2026
+description: 'Generic 2026 F1 car: fastest-lap''s ferrari_2022 model on the 2026 wheelbase, calibrated to the 2024
+  Monza and Spa laps (FastSlowRR 001 W8/W9)'
+body:
+  ground_clearance: 0.057
+geometry:
+  wheel_base: 3.4
+  wheel_tread: 1.542
+  wheel_radius: 0.36
+  wheel_width: 0.425
+  front_overhang: 1.117
+  rear_overhang: 0.639
+  left_overhang: 0.226
+  right_overhang: 0.226
+  vehicle_height: 1.125
+  max_steer_angle: 0.3491
+mirror:
+  min_longitudinal_offset: 1.2
+  max_longitudinal_offset: 1.6
+  min_lateral_offset: -0.6
+  max_lateral_offset: 0.6
+  min_height_offset: 0.6
+  max_height_offset: 0.8
+inertia:
+  mass: 795.0
+  com_front_fraction: 0.5477
+  com_lateral: 0.0
+  com_height: 0.3012
+  inertia_box:
+  - 1.883
+  - 2.0
+  - 1.125
+wheels:
+  mass: 12.0
+  damping_rate: 0.25
+tires:
+  friction: 1.9227
+  lat_stiff_max_load: 2.0
+  lat_stiff_value: 36.42
+  long_stiff_value: 10422.1
+  friction_vs_slip:
+  - - 0.0
+    - 1.0
+  - - 0.11
+    - 1.0
+  - - 1.0
+    - 0.85
+brakes:
+  max_brake_torque: 2990.1
+  distribution: static
+  dead_time: 0.02
+  time_constant: 0.02
+  abs:
+    enabled: false
+powertrain:
+  model: ev
+  max_drive_torque: 6019.6
+  drive_axle: rear
+  gear_ratio: 1.0
+  motor_peak_torque: 12039.1
+  motor_peak_power: 668840.0
+  motor_max_rpm: 2917.8
+  motor_time_constant: 0.02
+  regen_max_torque: 0.0
+  regen_max_power: 0.0
+  traction_control:
+    enabled: false
+  differential:
+    type: lsd
+resistance:
+  rolling_coefficient: 0.015
+  drag_coefficient: 1.1257
+  frontal_area: 1.5
+  air_density: 1.2
+aero:
+  lift_coefficient: 4.7138
+  drag_coefficient: 1.1257
+  frontal_area: 1.5
+  air_density: 1.2
+  centre_of_pressure:
+    x: 1.5875
+    z: 0.3282
+  front_share: 0.4669
+  drag_scale:
+    monza: 0.8206
+    spa: 0.9785
+tire_model:
+  type: rewritten_brush
+  peak_slip: 0.11
+  peak_slip_angle_deg: 9.0
+  load_sensitivity:
+    reference_loads:
+    - 2000.0
+    - 8000.0
+    front:
+    - 1.9227
+    - 1.9225
+    rear:
+    - 1.9335
+    - 1.5132
+steering:
+  ackermann: true
+  time_constant: 0.03
+  rate_limit: 6.0
+suspension:
+  frequency: 4.0
+  damping_ratio: 0.6
+  travel: 0.12
+isaac:
+  physx:
+    substeps: 8
+    substep_threshold_speed: 5.0
+    min_active_slip_denominator: 4.0
+    min_passive_slip_denominator: 4.0
+    min_lateral_slip_denominator: 1.0
+    sticky_tire_threshold_speed: 0.2
+    sticky_tire_threshold_time: 1.0
+    longitudinal_sticky_tire_damping: 200.0
+    lateral_sticky_tire_damping: 200.0
+sensor_kit:
+  mount:
+    x: 1.25
+    y: 0.0
+    z: 1.05
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+sensors:
+  front_wide:
+    type: camera
+    calibration_key: front_wide/camera_link
+    link: front_wide/camera_link
+    frame: front_wide/camera_optical_link
+    topic: /sensing/camera/front_wide/image_raw
+    info_topic: /sensing/camera/front_wide/camera_info
+    mount:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    width: 1920
+    height: 1080
+    horizontal_fov: 120.0
+    rate_hz: 30.0
+    isaac:
+      enabled: true
+  front_tele:
+    type: camera
+    calibration_key: front_tele/camera_link
+    link: front_tele/camera_link
+    frame: front_tele/camera_optical_link
+    topic: /sensing/camera/front_tele/image_raw
+    info_topic: /sensing/camera/front_tele/camera_info
+    mount:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    width: 1920
+    height: 1080
+    horizontal_fov: 30.0
+    rate_hz: 30.0
+    isaac:
+      enabled: true
+  front_left:
+    type: camera
+    calibration_key: front_left/camera_link
+    link: front_left/camera_link
+    frame: front_left/camera_optical_link
+    topic: /sensing/camera/front_left/image_raw
+    info_topic: /sensing/camera/front_left/camera_info
+    mount:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 1.0472
+    width: 1920
+    height: 1080
+    horizontal_fov: 120.0
+    rate_hz: 30.0
+    isaac:
+      enabled: true
+  front_right:
+    type: camera
+    calibration_key: front_right/camera_link
+    link: front_right/camera_link
+    frame: front_right/camera_optical_link
+    topic: /sensing/camera/front_right/image_raw
+    info_topic: /sensing/camera/front_right/camera_info
+    mount:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: -1.0472
+    width: 1920
+    height: 1080
+    horizontal_fov: 120.0
+    rate_hz: 30.0
+    isaac:
+      enabled: true
+  imu:
+    type: imu
+    calibration_key: imu_link
+    link: imu_link
+    frame: imu_link
+    topic: /sensing/imu/imu_link/imu_raw
+    mount:
+      x: 0.35
+      y: 0.0
+      z: -0.75
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    rate_hz: 200.0
+    isaac:
+      enabled: true
+  gnss:
+    type: gnss
+    calibration_key: gnss_link
+    link: gnss_link
+    frame: gnss_link
+    topic: /sensing/gnss/gnss_link/nav_sat_fix
+    mount:
+      x: 0.0
+      y: 0.0
+      z: 0.05
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    rate_hz: 20.0
+    isaac:
+      enabled: true
+provenance:
+  geometry:
+    basis: 'wheelbase: FIA 2026 maximum (3.40 m); track, wheel radius and widths: the W7 body (vehicles/generic_f1_2026/body.json);
+      overhangs and height: the W7 chassis bounding box in base_link; side overhangs from the wheel centres'
+  geometry.max_steer_angle:
+    assumed: true
+    basis: 20 deg at the bicycle angle, the Isaac car's limit (001 W8)
+  mirror:
+    assumed: true
+    basis: placeholder box around the cockpit mirrors; not used by the racing stack
+  inertia:
+    basis: fastest-lap ferrari_2022 (mass 795 kg, CoM height, yaw inertia 500 kg m^2); front share kept from it
+      on the 2026 wheelbase (circuitgen.dynamics.sim_params)
+  inertia.inertia_box:
+    basis: a uniform box 2.0 m wide sized so m (l^2 + w^2) / 12 is the yaw inertia
+  tires:
+    basis: 'peak friction 1.923: the W9-calibrated mu(Fz) at a quarter-car rest load (tyre_mu_scale [0.8802, 1.0799]);
+      stiffnesses put PhysX''s brush peak at slip 0.11 and 9.0 deg. The Isaac car (isaac/f1car.py) rewrites friction
+      and both stiffnesses every step from each wheel''s load (load sensitivity) and its surface class (002 S1)'
+  tires.friction_vs_slip:
+    basis: 'the Isaac car''s graph (001 W8): flat to the peak, 0.85 at full slip'
+  brakes:
+    basis: 'fastest-lap brake torque per axle 4701 N m x front bias 0.636 = the front wheel''s maximum, as the Isaac
+      car applies it (rear: x 0.364). `static` splits by axle load in sim_vehicle_ecu, not by the bias: a mismatch
+      to settle in 003 R3'
+  brakes.dead_time:
+    assumed: true
+    basis: brake-by-wire response, fast
+  powertrain:
+    basis: 'constant power 668.8 kW on the rear axle (fastest-lap f1-3dof; no ERS strategy), written in the ev model:
+      1:1, torque limit to 20 m/s, a wheel-speed limit at 110 m/s. The Isaac car splits drive by rear-tyre grip
+      (its stand-in for fastest-lap''s stiff differential): `lsd` here'
+  resistance:
+    basis: fastest-lap ferrari_2022 aero (Cd x A); rolling coefficient assumed
+  aero:
+    basis: fastest-lap ferrari_2022 Cl and Cd; Cl x 1.403 and the drag scales per circuit from the W9 calibration
+      to the 2024 laps (vehicles/generic_f1_2026/calibration.json); centre of pressure from fastest-lap's aero balance
+      on the 2026 wheelbase
+  tire_model:
+    basis: 'the Isaac car''s tyre (isaac/f1car.py): fastest-lap''s mu(Fz), linear between its two reference loads,
+      x tyre_mu_scale [0.8802, 1.0799] (W9), the high-load mu capped at the low-load one; friction and stiffnesses
+      rewritten every step so the brush tyre peaks at peak_slip and peak_slip_angle_deg at any load'
+  steering:
+    assumed: true
+    basis: a fast power-steering actuator
+  suspension:
+    assumed: true
+    basis: '4 Hz, damping 0.6, 12 cm travel: the Isaac car''s (001 W8)'
+  isaac.physx:
+    basis: isaac/f1car.py's PhysX vehicle settings (001 W8/W9)
+  sensors:
+    assumed: true
+    basis: Alpamayo's four-camera reference rig (front-left, front-wide, front-right, telephoto; docs/VLMAutowareIntegration.md)
+      on the roll hoop; FOVs and yaws assumed. IMU near the CoM, GNSS on the rig; an RTK GNSS/INS unit's rates (003
+      R4)

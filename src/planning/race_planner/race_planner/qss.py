@@ -11,13 +11,23 @@ pitch, tan(theta) = grade), with:
 - drive on the driven axle only: its normal load with the longitudinal load transfer
   (rear: m (g cos(theta) lr + a h) / L), the circle left after that axle's share of a_y, the
   motor's axle torque / wheel radius, and its power / v;
-- resistance: drag v^2 / m, rolling roll g cos(theta), and gravity g sin(theta) along the road.
+- resistance: drag v^2 / m, rolling roll g cos(theta), and gravity g sin(theta) along the road;
+- a downforce car's (car.downforce): its load per unit mass, downforce v^2 / m, added to
+  g cos(theta) (on the driven axle its share), so the corner cap is
+  sqrt(mu g cos(theta) / (|kappa| - mu downforce / m)), none where that is <= 0.
 """
 import math
 
 import numpy as np
 
 G = 9.81
+
+
+def _v_top(car):
+    """The car's top speed: where its power meets drag, or its motor's wheel speed (the cap
+    where a downforce car's grip outgrows a bend's need)."""
+    v = (car.power_max / car.drag) ** (1 / 3) if car.drag > 0 else 1e3
+    return min(v, car.wheel_speed_max) if car.wheel_speed_max else v
 
 
 def _resist(car, v, cos_t, sin_t):
@@ -38,8 +48,14 @@ def _drive_accel(car, v, kappa, mu, cos_t):
     # a = mu' g cos static / (1 - sign mu' h / L) with mu' the circle's longitudinal part, from
     # the axle's lateral need at that load (a fixed point: two iterations do)
     a = 0.0
+    if car.downforce:
+        share = car.aero_front_share if car.drive_axle == "front" else (
+            1.0 - car.aero_front_share if car.drive_axle == "rear" else 1.0)
+        aero = car.downforce * v * v / car.m * share
+    else:
+        aero = 0.0
     for _ in range(3):
-        load = G * cos_t * static + sign * a * h / L          # per unit mass on the axle
+        load = G * cos_t * static + aero + sign * a * h / L   # per unit mass on the axle
         lat = abs(ay) * lat_share
         lon = math.sqrt(max(0.0, (mu * load) ** 2 - lat * lat))
         a = lon
@@ -51,7 +67,8 @@ def _drive_accel(car, v, kappa, mu, cos_t):
 
 def _brake_accel(car, v, kappa, mu, cos_t):
     ay = v * v * kappa
-    return math.sqrt(max(0.0, (mu * G * cos_t) ** 2 - ay * ay))
+    g = G * cos_t + (car.downforce * v * v / car.m if car.downforce else 0.0)
+    return math.sqrt(max(0.0, (mu * g) ** 2 - ay * ay))
 
 
 def speed_profile(track, car, v_start=None, v_end=None, v_max=None):
@@ -63,7 +80,8 @@ def speed_profile(track, car, v_start=None, v_end=None, v_max=None):
     n = len(s)
     cap = np.full(n, np.inf if v_max is None else float(v_max))
     with np.errstate(divide="ignore"):
-        cap = np.minimum(cap, np.sqrt(mu * G * cos_t / np.where(kappa > 1e-9, kappa, 1e-12)))
+        k = np.where(kappa > 1e-9, kappa, 1e-12) - (mu * car.downforce / car.m if car.downforce else 0.0)
+        cap = np.minimum(cap, np.where(k > 0, np.sqrt(mu * G * cos_t / np.maximum(k, 1e-12)), _v_top(car)))
     if v_start is not None:
         cap[0] = min(cap[0], v_start)
     if v_end is not None:
