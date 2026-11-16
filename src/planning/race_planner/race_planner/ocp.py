@@ -26,7 +26,9 @@ The only settings are the car's (STEER_RATE: a fast rack, a drift car's) and the
 is per track.
 """
 import math
+import os
 import shutil
+import tempfile
 
 import casadi as ca
 import numpy as np
@@ -145,12 +147,21 @@ def _warm_start(track, car, margin, v_start):
     return X, U
 
 
+def _jit_dir():
+    """The JIT's sources and objects go to one shared temporary folder (CasADi writes them to
+    the working directory otherwise); their names are unique and CasADi removes its own."""
+    d = os.path.join(tempfile.gettempdir(), "race_planner_jit")
+    os.makedirs(d, exist_ok=True)
+    return d + os.sep
+
+
 def _jit_options():
     """gcc through ccache when there is one: the same car compiles to the same code, so a second
     solve (or process) skips the ~40 s compile of the derivatives."""
     cc = "ccache gcc" if shutil.which("ccache") else "gcc"
     return {"jit": True, "compiler": "shell",
-            "jit_options": {"compiler": cc, "flags": ["-O2"], "verbose": False}}
+            "jit_options": {"compiler": cc, "flags": ["-O2"], "verbose": False,
+                            "directory": _jit_dir()}}
 
 
 def _interval_function(f, g, w_both):
