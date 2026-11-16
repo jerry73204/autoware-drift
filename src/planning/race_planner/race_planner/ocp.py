@@ -26,6 +26,7 @@ The only settings are the car's (STEER_RATE: a fast rack, a drift car's) and the
 is per track.
 """
 import math
+import shutil
 
 import casadi as ca
 import numpy as np
@@ -144,8 +145,32 @@ def _warm_start(track, car, margin, v_start):
     return X, U
 
 
+def _jit_options():
+    """gcc through ccache when there is one: the same car compiles to the same code, so a second
+    solve (or process) skips the ~40 s compile of the derivatives."""
+    cc = "ccache gcc" if shutil.which("ccache") else "gcc"
+    return {"jit": True, "compiler": "shell",
+            "jit_options": {"compiler": cc, "flags": ["-O2"], "verbose": False}}
+
+
+def _interval_function(f, g, w_both):
+    """One interval's shooting step, cost and path constraints as one compiled function, mapped
+    over the intervals (fast=True): CasADi then differentiates and evaluates one small C function
+    per interval instead of walking a graph of every interval's calls (the exact Hessian was
+    ~3/4 of an iteration). wr: 0 drops the wheel-speed smoothing on an open track's last."""
+    x, u, un, p = ca.MX.sym("x", 6), ca.MX.sym("u", 7), ca.MX.sym("un", 7), ca.MX.sym("p", 8)
+    h, wr = ca.MX.sym("h"), ca.MX.sym("wr")
+    xn, dt = _rk4(f, x, u, p, h)
+    gk = g(x, u, p)
+    cost = dt + REG_STEER * u[0] ** 2 * h + wr * REG_WHEEL * ca.sumsqr(un[1:5] - u[1:5])
+    if w_both:
+        cost += w_both * gk[8] * h
+    F = ca.Function("interval", [x, u, un, p, h, wr], [xn, cost, gk]).expand()
+    return ca.Function("interval_jit", [x, u, un, p, h, wr], F(x, u, un, p, h, wr), _jit_options())
+
+
 def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, verbose, w_both,
-           beta_max=None, rear_alpha_max=None):
+           beta_max=None, rear_alpha_max=None, fast=False):
     closed = track.closed
     N, M = len(track.s), len(h)
     opti = ca.Opti()
@@ -154,7 +179,19 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
     U = ca.diag(U_SCALE) @ Us
     time = 0
     half = 0.5 * car.width
-    for k in range(M):
+    if fast:
+        F = _interval_function(f, g, w_both).map(M, "serial")
+        Xn = ca.horzcat(X[:, 1:], X[:, :1]) if closed else X[:, 1:]
+        Un = ca.horzcat(U[:, 1:], U[:, :1] if closed else U[:, -1:])
+        wr = np.ones((1, M))
+        if not closed:
+            wr[0, -1] = 0.0
+        xn, cost, gm = F(X[:, :M], U, Un, P[:, :M], h[None, :], wr)
+        opti.subject_to(Xn == xn)
+        opti.subject_to(opti.bounded(np.tile(np.array(lbg, float)[:, None], M), gm,
+                                     np.tile(np.array(ubg, float)[:, None], M)))
+        time = ca.sum2(cost)
+    for k in range(0 if fast else M):
         j = (k + 1) % N
         xn, dt = _rk4(f, X[:, k], U[:, k], P[:, k], h[k])
         opti.subject_to(X[:, j] == xn)
@@ -205,7 +242,8 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
 
 
 def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False,
-                   grip=1.0, beta_max=None, rear_alpha_max=None, warm=None, free_only=False):
+                   grip=1.0, beta_max=None, rear_alpha_max=None, warm=None, free_only=False,
+                   fast=False):
     """The minimum-time trajectory along `track` for `car`. Open tracks start at v_start (m/s,
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
@@ -219,6 +257,9 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     solve's), the minimum-curvature line's otherwise. free_only: the first solve alone, each
     wheel's torque free within its brake and the motor (a car whose brakes are modulated per
     wheel, not split by sim_vehicle_ecu's distribution: FastSlowRR's Isaac F1 car).
+    fast: the intervals as one JIT-compiled function mapped over the track (needs gcc): ~3x
+    faster per iteration on a long track; the same problem, but its sums are taken in another
+    order, so the solution is not bit for bit the default's.
 
     Solves in turn: first with each wheel's torque free within its brake and the motor, from the
     minimum-curvature line's warm start; then the car's own, from that, once per W_BOTH. Started cold, the brake system's coupling
@@ -237,7 +278,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
                    track.stiff_long, track.stiff_lat, track.peak_long, track.peak_lat])
     X0, U0 = _warm_start(track, car, margin, v_start) if warm is None else warm
     ok, status, Xv, Uv = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
-                                max_iter, verbose, 0.0, beta_max, rear_alpha_max)
+                                max_iter, verbose, 0.0, beta_max, rear_alpha_max, fast)
     stages = [status]
     if free_only:
         g, lbg, ubg = g_free, lo, hi
@@ -245,7 +286,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
         if not ok:
             break
         ok, status, Xv, Uv = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
-                                    max_iter, verbose, w_both, beta_max, rear_alpha_max)
+                                    max_iter, verbose, w_both, beta_max, rear_alpha_max, fast)
         stages.append(status)
     vx, vy, r, n, xi, delta = Xv
     sdot = (vx * np.cos(xi) - vy * np.sin(xi)) / (1 - n * track.kappa)

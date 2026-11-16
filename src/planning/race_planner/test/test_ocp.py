@@ -116,3 +116,24 @@ def test_the_plan_brakes_with_the_car_s_own_bias():
     # the motor's drive under the brakes: the rear's torque beyond its brake share
     drive = T[braking, 2] + T[braking, 3] - (T[braking, 0] + T[braking, 1])
     assert drive.max() < 50.0
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_fast_solves_the_same_problem(closed):
+    """fast=True (the intervals JIT-compiled and mapped) is the same problem: the same optimum,
+    open (with the wheels' smoothing off the last interval) and closed (wrapping round)."""
+    if closed:
+        r = 40.0
+        t = road(lambda s: 1.0 / r, 2 * math.pi * r - 2.0, ds=2.0, w=3.0, closed=True)
+        kw = {}
+    else:
+        r, a, b = 20.0, 120.0, 120.0 + 0.5 * math.pi * 20.0
+        t = road(lambda s: 1.0 / r if a <= s < b else 0.0, b + 60.0).resampled(2.0)
+        kw = {"v_start": 25.0}
+    c = Car.from_spec(SPEC)
+    a_, b_ = solve_min_time(t, c, **kw), solve_min_time(t, c, fast=True, **kw)
+    assert a_["ok"] and b_["ok"], (a_["status"], b_["status"])
+    assert b_["stages"] == a_["stages"]
+    assert b_["time"] == pytest.approx(a_["time"], rel=1e-4)        # IPOPT tol 1e-6
+    assert np.max(np.abs(b_["n"] - a_["n"])) < 0.02
+    assert np.max(np.abs(b_["vx"] - a_["vx"])) < 0.02
