@@ -137,3 +137,17 @@ def test_fast_solves_the_same_problem(closed):
     assert b_["time"] == pytest.approx(a_["time"], rel=1e-4)        # IPOPT tol 1e-6
     assert np.max(np.abs(b_["n"] - a_["n"])) < 0.02
     assert np.max(np.abs(b_["vx"] - a_["vx"])) < 0.02
+
+
+def test_sections_reach_the_lap_s_optimum():
+    """sections=3: a closed lap warm-started from three overlapping open pieces solved at once
+    (one process each) reaches the optimum the lap alone does."""
+    r = 40.0
+    t = road(lambda s: 1.0 / r, 2 * math.pi * r - 2.0, ds=2.0, w=3.0, closed=True)
+    c = car()
+    a = solve_min_time(t, c)
+    b = solve_min_time(t, c, sections=3, section_overlap=20.0)
+    assert b["ok"], b["status"]
+    assert len(b["sections"]) == 3 and all(p["ok"] for p in b["sections"])
+    assert b["time"] == pytest.approx(a["time"], rel=1e-4)
+    assert np.max(np.abs(b["n"] - a["n"])) < 0.02

@@ -29,6 +29,9 @@ import math
 import os
 import shutil
 import tempfile
+import time
+from dataclasses import replace
+from multiprocessing import get_context
 
 import casadi as ca
 import numpy as np
@@ -36,6 +39,7 @@ import numpy as np
 from race_planner import model
 from race_planner.line import min_curvature_line
 from race_planner.qss import speed_profile
+from race_planner.track import TYRE_FIELDS
 
 G = 9.81
 # The steering rate when the spec sets none (drift_mustang's actuator is instantaneous): a fast
@@ -181,7 +185,7 @@ def _interval_function(f, g, w_both):
 
 
 def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, verbose, w_both,
-           beta_max=None, rear_alpha_max=None, fast=False):
+           beta_max=None, rear_alpha_max=None, fast=False, ipopt=None):
     closed = track.closed
     N, M = len(track.s), len(h)
     opti = ca.Opti()
@@ -242,7 +246,7 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
     opti.set_initial(Us, U0[:, :M] / U_SCALE[:, None])
     opti.solver("ipopt", {"print_time": False},
                 {"max_iter": max_iter, "tol": 1e-6, "print_level": 5 if verbose else 0,
-                 "sb": "yes", "mu_strategy": "adaptive"})
+                 "sb": "yes", "mu_strategy": "adaptive", **(ipopt or {})})
     try:
         sol = opti.solve()
         ok, get = True, sol.value
@@ -253,9 +257,55 @@ def _solve(track, car, f, g, lbg, ubg, h, P, X0, U0, margin, v_start, max_iter, 
             np.asarray(get(U)).reshape(7, M), int(st.get("iter_count", -1)))
 
 
+_PER_NODE = ("s", "x", "y", "z", "psi", "kappa", "w_left", "w_right", "mu", "grade", "sliding") \
+    + TYRE_FIELDS
+
+
+def _section(track, i0, n):
+    """The open piece of a closed track from node i0, n nodes long, wrapping round."""
+    N = len(track.s)
+    k = i0 + np.arange(n)
+    idx = k % N
+    lap = track.s[-1] - track.s[0] + math.hypot(track.x[0] - track.x[-1], track.y[0] - track.y[-1])
+    d = {f: getattr(track, f)[idx] for f in _PER_NODE if getattr(track, f) is not None}
+    d["s"] = track.s[idx] + lap * (k // N)
+    d["s"] = d["s"] - d["s"][0]
+    d["psi"] = np.unwrap(d["psi"])
+    return replace(track, closed=False, **d)
+
+
+def _solve_section(job):
+    track, car, kw = job
+    t0 = time.time()
+    r = solve_min_time(track, car, v_start=None, **kw)
+    return r["X"], r["U"], {"ok": r["ok"], "status": r["status"], "iters": r["iters"],
+                            "wall_s": round(time.time() - t0, 1)}
+
+
+def _sections_warm(track, car, K, overlap, kw):
+    """A closed track's warm start from K overlapping open pieces solved at once, one process
+    each: each keeps its core, the overlap (m, each side) absorbing its ends (an open piece
+    starts on the reference line, straight, and stops caring at its end)."""
+    N = len(track.s)
+    ov = int(round(overlap / float(np.median(np.diff(track.s)))))
+    core = int(math.ceil(N / K))
+    n = min(core + 2 * ov, N)
+    ov = (n - core) // 2
+    jobs = [(_section(track, (c * core - ov) % N, n), car, kw) for c in range(K)]
+    with get_context("spawn").Pool(K) as pool:
+        res = pool.map(_solve_section, jobs)
+    X, U = np.zeros((6, N)), np.zeros((7, N))
+    for c, (Xs, Us, _) in enumerate(res):
+        g = c * core + np.arange(core)
+        keep = g < N
+        X[:, g[keep]] = Xs[:, ov:ov + core][:, keep]
+        U[:, g[keep]] = Us[:, ov:ov + core][:, keep]
+    return (X, U), [i for _, _, i in res]
+
+
 def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=False,
                    grip=1.0, beta_max=None, rear_alpha_max=None, warm=None, free_only=False,
-                   fast=False):
+                   fast=False, ipopt=None, sections=None, section_overlap=300.0):
     """The minimum-time trajectory along `track` for `car`. Open tracks start at v_start (m/s,
     None: free) on the reference line; closed ones are periodic. Returns a dict of arrays per
     node (s, n, xi, vx, vy, r, delta, beta, t, x, y; torque, fz, kappa, alpha, w per node of
@@ -273,6 +323,11 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     fast: the intervals as one JIT-compiled function mapped over the track (needs gcc): ~3x
     faster per iteration on a long track; the same problem, but its sums are taken in another
     order, so the solution is not bit for bit the default's.
+    sections: a closed track's warm start from that many overlapping open pieces (section_overlap
+    m each side) solved at once, one process each, then the lap from it (result: sections, each
+    piece's status, iterations and wall time). Monza with the F1 car: 8 pieces, 12 min against
+    38 for the lap alone (819 iterations; from the pieces 69), to the same optimum.
+    ipopt: options added to IPOPT's (e.g. an HSL linear solver: linear_solver, hsllib).
 
     Solves in turn: first with each wheel's torque free within its brake and the motor, from the
     minimum-curvature line's warm start; then the car's own, from that, once per W_BOTH. Started cold, the brake system's coupling
@@ -289,9 +344,15 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     M = len(h)
     P = np.vstack([track.kappa, grip * track.mu, track.grade, track.sliding,
                    track.stiff_long, track.stiff_lat, track.peak_long, track.peak_lat])
+    pieces = None
+    if sections and sections > 1 and warm is None:
+        assert closed, "sections: a closed track's"
+        warm, pieces = _sections_warm(track, car, int(sections), section_overlap, dict(
+            margin=margin, max_iter=max_iter, grip=grip, beta_max=beta_max,
+            rear_alpha_max=rear_alpha_max, free_only=free_only, fast=fast, ipopt=ipopt))
     X0, U0 = _warm_start(track, car, margin, v_start) if warm is None else warm
     ok, status, Xv, Uv, it = _solve(track, car, f, g_free, lo, hi, h, P, X0, U0, margin, v_start,
-                                max_iter, verbose, 0.0, beta_max, rear_alpha_max, fast)
+                                max_iter, verbose, 0.0, beta_max, rear_alpha_max, fast, ipopt)
     stages, iters = [status], [it]
     if free_only:
         g, lbg, ubg = g_free, lo, hi
@@ -299,7 +360,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
         if not ok:
             break
         ok, status, Xv, Uv, it = _solve(track, car, f, g, lbg, ubg, h, P, Xv, Uv, margin, v_start,
-                                    max_iter, verbose, w_both, beta_max, rear_alpha_max, fast)
+                                    max_iter, verbose, w_both, beta_max, rear_alpha_max, fast, ipopt)
         stages.append(status)
         iters.append(it)
     vx, vy, r, n, xi, delta = Xv
@@ -317,7 +378,7 @@ def solve_min_time(track, car, v_start=None, margin=0.3, max_iter=3000, verbose=
     violation = {"defect": (float(defect.max()), float(s[int(defect.argmax())]))}
     for i, name in enumerate(FREE_ROWS if free_only else PATH_ROWS):
         violation[name] = (float(over[:, i].max()), float(s[int(over[:, i].argmax())]))
-    return {"ok": ok, "violation": violation, "status": status, "stages": stages, "iters": iters, "time": float(np.sum(seg)),
+    return {"ok": ok, "violation": violation, "status": status, "stages": stages, "iters": iters, "sections": pieces, "time": float(np.sum(seg)),
             "s": s, "t": t,
             "n": n, "xi": xi, "vx": vx, "vy": vy, "r": r, "delta": delta,
             "beta": np.arctan2(vy, vx), "sdot": sdot,
