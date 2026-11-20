@@ -17,9 +17,10 @@ from race_planner.qss import lap_time, speed_profile
 from race_planner.steady import steady_state
 from race_planner.track import TYRE_FIELDS, SurfaceTable, Track
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
-CLASSES = os.path.join(SWB, "src/swb_isaac_world/config/surface_classes.yaml")
+from race_planner import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+SWB = scensim.SWB or os.path.expanduser("~/repos/scenario-world-bridge")   # course data, play_log
+SPEC = scensim.spec("drift_mustang")
+CLASSES = scensim.surface_classes()
 HARUNA = os.path.join(SWB, "data/courses/haruna")
 MU = 1.12
 

@@ -16,8 +16,9 @@ from race_planner.surface import FrictionEstimate, Perception, SurfaceMap, Zone
 from race_planner.track import SurfaceTable, Track
 from test_ocp import SPEC, road
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-CLASSES = os.path.join(SWB, "src/swb_isaac_world/config/surface_classes.yaml")
+from race_planner import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+SWB = scensim.SWB or os.path.expanduser("~/repos/scenario-world-bridge")   # course data, play_log
+CLASSES = scensim.surface_classes()
 HARUNA = os.path.join(SWB, "data/courses/haruna")
 
 

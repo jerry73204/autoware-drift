@@ -206,9 +206,8 @@ class MultiStart:
             opts = dict(schedule) if isinstance(schedule, dict) else {}
             if opts.get("table") is None:
                 from race_planner.track import SurfaceTable
-                swb = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-                opts["table"] = SurfaceTable.from_yaml(
-                    os.path.join(swb, "src/swb_isaac_world/config/surface_classes.yaml"))
+                from race_planner import scensim
+                opts["table"] = SurfaceTable.from_yaml(scensim.surface_classes())
             self.scheduler = Scheduler(d.track, d.car, grip=d.grip, **opts)
             self.slots = ("G", "H", "D", "F")
             self.peaks = self._node_peaks()

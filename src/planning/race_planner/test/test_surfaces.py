@@ -23,13 +23,22 @@ from race_planner import model
 from race_planner.car import Car
 from race_planner.track import TYRE_FIELDS, SurfaceTable, Track
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
-CLASSES = os.path.join(SWB, "src/swb_isaac_world/config/surface_classes.yaml")
+from race_planner import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+SWB = scensim.SWB or os.path.expanduser("~/repos/scenario-world-bridge")   # course data, play_log
+SPEC = scensim.spec("drift_mustang")
+CLASSES = scensim.surface_classes()
 HARUNA = os.path.join(SWB, "data/courses/haruna")
-sys.path.insert(0, os.path.join(SWB, "src/swb_isaac_world"))
-swb = pytest.importorskip("swb_isaac_world.surfaces")
-layer = pytest.importorskip("swb_isaac_world.surface_layer")
+# Isaac's surface layer: the checkout's swb_isaac_world (scensim_isaac_world in a scensim one),
+# else the pip-installed release's scensim_isaac_world
+for _w in ("swb_isaac_world", "scensim_isaac_world"):
+    if scensim.SWB and os.path.isdir(os.path.join(scensim.SWB, "src", _w, _w)):
+        sys.path.insert(0, os.path.join(scensim.SWB, "src", _w))
+        break
+else:
+    _w = "scensim_isaac_world"
+    sys.path.append(os.path.join(scensim.SIM, "local/lib/python3.10/dist-packages"))
+swb = pytest.importorskip(f"{_w}.surfaces")
+layer = pytest.importorskip(f"{_w}.surface_layer")
 
 NO_FALL = 1e6          # a peak share so far out that rho never passes 1: PhysX's own tyre
 

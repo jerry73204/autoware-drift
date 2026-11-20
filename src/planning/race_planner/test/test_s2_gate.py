@@ -200,9 +200,8 @@ def _every_class_map(cost):
     import os
     from race_planner.budget import LossMap
     from race_planner.track import SurfaceTable
-    swb = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-    tab = SurfaceTable.from_yaml(os.path.join(
-        swb, "src/swb_isaac_world/config/surface_classes.yaml"))
+    from race_planner import scensim
+    tab = SurfaceTable.from_yaml(scensim.surface_classes())
     return LossMap({c: [[40.0, math.pi / 2, 8.0, cost, 0.5]] for c in tab.mu_of})
 
 

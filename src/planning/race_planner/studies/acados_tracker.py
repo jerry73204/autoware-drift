@@ -44,8 +44,10 @@ from race_planner.car import Car  # noqa: E402
 from race_planner.ocp import STEER_RATE  # noqa: E402
 from race_planner.track import Track  # noqa: E402
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
+from scensim_paths import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+
+SWB = scensim.PLAY_LOG[:-len("/play_log")]
+SPEC = scensim.spec("drift_mustang")
 CACHE = os.path.expanduser("~/.cache/race_planner/acados")
 COURSE = "c:gravel:15:90:8"
 
@@ -394,9 +396,6 @@ def main(argv=None):
     ap.add_argument("--label", default="x86")
     ap.add_argument("--arm", default="single")
     a = ap.parse_args(argv)
-    if not os.path.isdir(SWB):
-        print(f"acados_tracker: SWB checkout not found: {SWB} (set SWB=...)", file=sys.stderr)
-        return 2
     path = _npz_path(a.out, a.course)
     if a.what == "record":
         record(a.course, path, arm=a.arm)

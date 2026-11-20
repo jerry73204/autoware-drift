@@ -8,7 +8,7 @@ sim.Plant drives) with the wall clock ON and reports the two layers' solve times
   not the tracker's internal `solve_s`), against the control tick (0.02 s). L2 runs in the main
   process; L1's seed solves run in spawned workers, which import the original class.
 
-Run:  SWB=<swb checkout> env -u PYTHONPATH .venv/bin/python studies/bench_live.py run
+Run:  env -u PYTHONPATH .venv/bin/python studies/bench_live.py run
           --courses c:asphalt:25:90:8,c:gravel:15:90:8,zones --arm sched --cpus 8,9,10,11
           --label NAME --out DIR [--length M] [--budget S]
 Writes DIR/<label>.json = {host, label, length, budget, per_course, all}. Refuses RP_DET=1 (that run
@@ -174,9 +174,11 @@ def main(argv=None):
         print("bench_live: RP_DET=1 is set; that run has no clock, so it measures nothing. "
               "Unset it.", file=sys.stderr)
         return 1
-    swb = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-    if not os.path.isdir(swb):
-        print(f"bench_live: SWB checkout not found: {swb} (set SWB=...)", file=sys.stderr)
+    try:   # the car and the surfaces, from scensim (pip, or the $SWB checkout)
+        from scensim_paths import scensim
+        scensim.spec("drift_mustang"), scensim.surface_classes()
+    except FileNotFoundError as e:
+        print(f"bench_live: {e}", file=sys.stderr)
         return 2
     return _bench(a)
 

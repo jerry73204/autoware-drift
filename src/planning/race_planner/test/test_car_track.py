@@ -8,9 +8,10 @@ import pytest
 from race_planner.car import Car
 from race_planner.track import Track, SurfaceTable
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
-CLASSES = os.path.join(SWB, "src/swb_isaac_world/config/surface_classes.yaml")
+from race_planner import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+SWB = scensim.SWB or os.path.expanduser("~/repos/scenario-world-bridge")   # course data, play_log
+SPEC = scensim.spec("drift_mustang")
+CLASSES = scensim.surface_classes()
 HARUNA = os.path.join(SWB, "data/courses/haruna")
 
 

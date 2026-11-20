@@ -97,7 +97,7 @@ def _deterministic():
 
 if os.environ.get("RP_DET") == "1":
     _deterministic()
-OUT = os.environ.get("M4_OUT", os.path.join(SWB, "play_log/race_planner/mode_choice/m4"))
+OUT = os.environ.get("M4_OUT", os.path.join(e1.scensim.PLAY_LOG, "race_planner/mode_choice/m4"))
 GRIP, DS = e1.GRIP, e1.DS
 RATE = 50.0
 CLASSES = ("asphalt", "mud_wet", "snow_loose", "gravel", "snow_packed", "ice")
@@ -1149,7 +1149,7 @@ def aggregate():
 
 # ---- S2 offline: the lap-time-against-drift curve from the signed map (roadmap 065 M2, E2) ----
 
-S2_OUT = os.path.join(SWB, "play_log/race_planner/style/m2")
+S2_OUT = os.path.join(e1.scensim.PLAY_LOG, "race_planner/style/m2")
 BUDGETS_S = (0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
 EPS_PCT = (0.3, 1.0, 2.0, 3.0)
 S1_LAP = {"haruna": 76.28, "tsukuba": 74.33}     # S1's det laps on 95b902e (065 E1)
@@ -1166,7 +1166,7 @@ def course_prices(name, out=None):
     from race_planner.multistart import s2_classes
     from race_planner.schedule import Scheduler
     from race_planner.style import Style
-    out = out or os.path.join(SWB, "play_log/race_planner/style/m3")
+    out = out or os.path.join(e1.scensim.PLAY_LOG, "race_planner/style/m3")
     car = Car.from_spec(e1.SPEC)
     planner, world, smap, s0, v0, span, info = tracks(name, car)
     sch = Scheduler(planner, car, table(), smap=smap, grip=GRIP)
@@ -1312,7 +1312,7 @@ def s2_report(d=None):
     print(text)
 
 
-M3_OUT = os.path.join(SWB, "play_log/race_planner/style/m3")
+M3_OUT = os.path.join(e1.scensim.PLAY_LOG, "race_planner/style/m3")
 
 
 def m3_report(d=None):

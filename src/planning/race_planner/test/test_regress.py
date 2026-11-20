@@ -73,8 +73,7 @@ def test_same_rev_is_nothing_to_compare():
         import pytest
         pytest.skip("race_planner has uncommitted changes: HEAD is not the working tree")
     t0 = time.time()
-    r = _cli("check", "--base", "HEAD",
-             env={"SWB": os.environ.get("SWB", os.path.expanduser("~/repos/scenario-world-bridge"))})
+    r = _cli("check", "--base", "HEAD")
     assert r.returncode == 0, r.stderr
     assert "nothing to compare" in r.stdout
     assert time.time() - t0 < 5

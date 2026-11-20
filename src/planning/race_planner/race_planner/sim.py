@@ -22,9 +22,9 @@ Isaac judges them (the live planner's design, section 6).
 - The car's own friction estimate, the ECU's (sim_vehicle_ecu.estimator), in the state as
   `mu_ratio`: the estimate over the tyre's design friction, as Isaac's car reports it.
 
-sim_vehicle_ecu is found beside this repository's checkout of the superproject
-(SWB/src/sim_vehicle_ecu, SWB from the environment, default ~/repos/carla-scenario-bridge), or
-at SIM_VEHICLE_ECU (a checkout of its own, e.g. a worktree of another commit).
+sim_vehicle_ecu is scensim's (race_planner.scensim.ecu_path): at SIM_VEHICLE_ECU (a checkout of
+its own, e.g. a worktree of another commit), in the $SWB checkout, or in the pip-installed
+scensim release.
 """
 from dataclasses import replace
 import math
@@ -38,12 +38,12 @@ import yaml
 from race_planner import model
 from race_planner.track import TYRE_FIELDS
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
 ECU_RATE, SUBSTEPS = 60.0, 8
 
 
 def _ecu_module():
-    path = os.environ.get("SIM_VEHICLE_ECU") or os.path.join(SWB, "src", "sim_vehicle_ecu")
+    from race_planner import scensim
+    path = scensim.ecu_path()
     if path not in sys.path:
         sys.path.insert(0, path)
     import sim_vehicle_ecu

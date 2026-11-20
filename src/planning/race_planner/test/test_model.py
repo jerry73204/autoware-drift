@@ -22,8 +22,9 @@ from race_planner import model
 from race_planner.car import Car
 from race_planner.steady import steady_state
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
+from race_planner import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+SWB = scensim.SWB or os.path.expanduser("~/repos/scenario-world-bridge")   # course data, play_log
+SPEC = scensim.spec("drift_mustang")
 ISAAC = np.load(os.path.join(os.path.dirname(__file__), "data/isaac_drift_mustang_dry.npz"))
 MU = 1.12   # dry asphalt, swb's surface classes (absolute, at tyre friction 1.0)
 

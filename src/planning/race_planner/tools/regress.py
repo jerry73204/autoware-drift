@@ -6,18 +6,21 @@ digests. The head side is this checkout as it stands (uncommitted changes includ
 side is `git worktree add --detach` of the base revision, put first on sys.path with RP_ROOT.
 Both sides use this checkout's studies/ harness, so what is compared is the race_planner
 package only. A base side's results are cached under ~/.cache/race_planner/regress/<base sha>/
-(keyed also by the harness, the set's argv and swb's car and surface files), so a second check
+(keyed also by the harness, the set's argv and scensim's car and surface files), so a second check
 pays for the head side only.
 
   regress.py check [--base origin/main] [--set FILE] [--jobs N]
-      exit 0: every run the same; 1: a run differs; 2: a setup error (no $SWB, a missing
+      exit 0: every run the same; 1: a run differs; 2: a setup error (no scensim, a missing
       file, an unknown base).
   regress.py run [--base REV] [--set FILE] [--jobs N]
       one side's outcomes, for inspection. HEAD (the default) means this checkout as it
       stands; any other revision runs in a worktree.
 
-$SWB must name a scenario-world-bridge checkout (the harness reads its vehicle spec and
-surface classes; the set's courses are synthetic, so no course data is needed).
+The harness reads scensim's vehicle spec, surface classes and ECU (race_planner/scensim.py):
+the pip-installed scensim's (`pip install --user scensim; scensim install`), or a checkout's
+when $SWB names one. The set's courses are synthetic, so no course data is needed. The base
+side runs its own race_planner with the same environment: one before race_planner/scensim.py
+finds the ECU only in $SWB, so set SWB when the base predates it.
 """
 import argparse
 import concurrent.futures as cf
@@ -42,6 +45,9 @@ HARNESS = os.path.join(STUDIES, "mode_choice_m4.py")
 PKG_REL = "src/planning/race_planner"
 DEFAULT_SET = os.path.join(TOOLS, "regress_set.yaml")
 CACHE = os.path.join(os.path.expanduser("~/.cache/race_planner"), "regress")
+sys.path.insert(0, STUDIES)
+from scensim_paths import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+
 FIELDS = ("result", "t", "plans_digest", "traj_digest", "n_plans", "error")
 RUN_TIMEOUT = 1800
 
@@ -206,10 +212,8 @@ def _cache_dir(base_sha, runs):
             h.update(f.encode())
             with open(os.path.join(STUDIES, f), "rb") as fh:
                 h.update(fh.read())
-    swb = os.environ["SWB"]
-    for p in ("src/sim_vehicle_spec/vehicles/drift_mustang.yaml",
-              "src/swb_isaac_world/config/surface_classes.yaml"):
-        with open(os.path.join(swb, p), "rb") as fh:
+    for p in (scensim.spec("drift_mustang"), scensim.surface_classes()):
+        with open(p, "rb") as fh:
             h.update(fh.read())
     h.update(json.dumps(runs).encode())
     return os.path.join(CACHE, base_sha, h.hexdigest()[:16])
@@ -315,15 +319,10 @@ def report(head, base):
 # ---- CLI ----
 
 def _check_env(set_path):
-    swb = os.environ.get("SWB")
-    if not swb:
-        raise SetupError("$SWB is not set: export SWB=<a scenario-world-bridge checkout>")
-    if not os.path.isdir(swb):
-        raise SetupError(f"$SWB={swb}: no such directory")
-    for p in ("src/sim_vehicle_spec/vehicles/drift_mustang.yaml",
-              "src/swb_isaac_world/config/surface_classes.yaml"):
-        if not os.path.isfile(os.path.join(swb, p)):
-            raise SetupError(f"$SWB={swb}: missing {p}")
+    try:
+        scensim.spec("drift_mustang"), scensim.surface_classes(), scensim.ecu_path()
+    except FileNotFoundError as e:
+        raise SetupError(str(e))
     return load_set(set_path)
 
 

@@ -14,8 +14,8 @@ It is not tied to one simulator, road or car:
   progress.
 - **Cars** come from a vehicle spec (mass, tyres, motor, brakes, steering).
 - **Driving it** today happens in NVIDIA Isaac Sim through
-  [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario-world-bridge) (swb), which
-  also builds the courses and surfaces.
+  [scensim](https://github.com/NEWSLabNTU/scensim) (formerly scenario-world-bridge, swb),
+  which also builds the courses and surfaces.
 
 <p align="center">
   <img src="docs/media/haruna_three_ways.gif" width="720"
@@ -204,10 +204,16 @@ perception still uses it.
 Before every push to `main`, run the regression gate, and the suite:
 
 ```bash
-export SWB=~/repos/scenario-world-bridge     # the harness reads swb's car and surface classes
+python3 -m pip install --user scensim && scensim install   # once: the car, surfaces and ECU
 just regress-check                           # race_planner here against origin/main
 just test                                    # and race_planner's pytest line under "Try it"
 ```
+
+The harness and the tests read scensim's vehicle spec, surface classes and ECU
+(`race_planner/scensim.py`) from the pip-installed release, or from a checkout when
+`SWB=<scensim checkout>` is set (for work on scensim's own source; also for a base revision
+from before `race_planner/scensim.py`). Tests on Haruna read its course data from `$SWB`, else
+`~/repos/scenario-world-bridge`, and skip without it.
 
 `just regress-check` drives a fixed set of runs
 (`src/planning/race_planner/tools/regress_set.yaml`: synthetic corners on asphalt, gravel,
@@ -215,7 +221,7 @@ packed snow and wet mud, and a misdeclared zone chain) under `RP_DET=1`, once wi
 race_planner as it stands here and once with `origin/main`'s (a temporary `git worktree`; both
 through this checkout's `studies/` harness). It prints one line per run with both sides' plan
 and trajectory digests, and exits 1 if any run's result, time or digests differ (2 on a setup
-error, such as no `$SWB`). `base=<rev>` compares against another revision. The base side's
+error, such as no scensim). `base=<rev>` compares against another revision. The base side's
 results are cached under `~/.cache/race_planner/regress/`, so a second check runs only this
 side. `just regress` prints this checkout's outcomes alone.
 

@@ -14,8 +14,9 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-BASE = os.path.join(SWB, "play_log/race_planner/mode_choice")
+from scensim_paths import scensim  # noqa: E402
+
+BASE = os.path.join(scensim.PLAY_LOG, "race_planner/mode_choice")
 M4, M4B = os.path.join(BASE, "m4"), os.path.join(BASE, "m4b")
 ARMS = ("single", "sched", "always")
 CLASSES = ("asphalt", "mud_wet", "snow_loose", "gravel", "snow_packed", "ice")

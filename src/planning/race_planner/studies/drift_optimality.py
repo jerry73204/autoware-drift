@@ -59,9 +59,11 @@ from race_planner.modes import (D_BRAKE, D_FROM, FLICK_PAST, SEED_PAST,  # noqa:
                                 _consistent_u, _zone, reshape_slip, seed_flick,
                                 seed_rear_out)
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
-CLASSES = os.path.join(SWB, "src/swb_isaac_world/config/surface_classes.yaml")
+from scensim_paths import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+
+SWB = scensim.PLAY_LOG[:-len("/play_log")]   # results go under SWB/play_log, as before
+SPEC = scensim.spec("drift_mustang")
+CLASSES = scensim.surface_classes()
 OUT = os.path.join(SWB, "play_log/race_planner/drift_study")
 
 DS = 2.0             # m, the window's grid

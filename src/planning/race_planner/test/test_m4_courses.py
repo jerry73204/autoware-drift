@@ -12,8 +12,7 @@ from race_planner.serve import PlanIds, plan_message
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "studies"))
 import mode_choice_m4 as m4  # noqa: E402
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-HARUNA = os.path.join(SWB, "data/courses/haruna")
+HARUNA = m4.e1.HARUNA   # swb's course data (the $SWB checkout, else ~/repos/scenario-world-bridge)
 
 
 @pytest.fixture(scope="module")

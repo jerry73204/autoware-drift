@@ -13,7 +13,7 @@ test:
 clean:
     rm -rf build install log
 
-# race_planner's regression set at this checkout, outcomes only (tools/regress.py; needs $SWB)
+# race_planner's regression set at this checkout, outcomes only (tools/regress.py; scensim from pip, or $SWB)
 regress:
     cd src/planning/race_planner && env -u PYTHONPATH .venv/bin/python tools/regress.py run --base HEAD
 

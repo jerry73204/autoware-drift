@@ -10,8 +10,9 @@ from race_planner.car import Car
 from race_planner.qss import speed_profile, braking_points
 from race_planner.track import Track
 
-SWB = os.environ.get("SWB", os.path.expanduser("~/repos/carla-scenario-bridge"))
-SPEC = os.path.join(SWB, "src/sim_vehicle_spec/vehicles/drift_mustang.yaml")
+from race_planner import scensim  # noqa: E402  (scensim from pip, or the $SWB checkout)
+SWB = scensim.SWB or os.path.expanduser("~/repos/scenario-world-bridge")   # course data, play_log
+SPEC = scensim.spec("drift_mustang")
 G = 9.81
 
 

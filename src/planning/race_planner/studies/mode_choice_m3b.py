@@ -45,7 +45,7 @@ from race_planner.track import SurfaceTable, Track  # noqa: E402
 import mode_choice_e1 as e1  # noqa: E402
 
 SWB = e1.SWB
-OUT = os.environ.get("M3B_OUT", os.path.join(SWB, "play_log/race_planner/mode_choice/m3b"))
+OUT = os.environ.get("M3B_OUT", os.path.join(e1.scensim.PLAY_LOG, "race_planner/mode_choice/m3b"))
 GRIP, DS, DT, SEED_BUDGET = e1.GRIP, e1.DS, e1.DT, e1.SEED_BUDGET
 APPROACH = 60.0
 SPIN_DEG = 89.0       # deg: the follower stops past this sideslip (live's 60 is the plant's)
