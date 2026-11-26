@@ -41,13 +41,17 @@ def spec(name="drift_mustang"):
 
 
 def surface_classes():
-    """Isaac's surface classes (scensim_isaac_world's config/surface_classes.yaml)."""
+    """Isaac's surface classes: scensim_world_server's since scensim 086 C2 (main, after 0.2.1),
+    scensim_isaac_world's config before."""
+    ws = "scensim_world_server"
     cands = []
     if SWB:
+        cands += [os.path.join(SWB, "src", "scensim_world_protocol", ws, ws, "surface_classes.yaml")]
         cands += [os.path.join(SWB, "src", w, "config", "surface_classes.yaml")
                   for w in ("scensim_isaac_world", "swb_isaac_world")]
     return _first("surface classes",
-                  cands + [os.path.join(SIM, "share", "scensim_isaac_world", "config", "surface_classes.yaml")])
+                  cands + [os.path.join(SIM, "share", w, "config", "surface_classes.yaml")
+                           for w in (ws, "scensim_isaac_world")])
 
 
 def ecu_path():
