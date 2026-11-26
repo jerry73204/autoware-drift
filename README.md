@@ -96,7 +96,7 @@ drift does to stock Autoware: [docs/autoware-in-a-drift.md](docs/autoware-in-a-d
 | Live planner and tracker (L1 + L2) | built; driven live in Isaac on Haruna's hairpins and Tsukuba, within 3.5 % of the whole-track plan, no contact |
 | Grip-or-drift choice (multi-start, surface schedule, friction estimate) | built; being measured across surfaces. Asphalt, gravel, mud and snow test corners finish; ice partly (about 10 of 12) |
 | Driving styles | `fastest` built; `drift_budget` in progress; `drift_max` designed |
-| Race nodes on Autoware's seams (diagram above) | designed, not built. Today the live planner drives the car directly through swb's Isaac course runner, without Autoware in the loop |
+| Race nodes on Autoware's seams (diagram above) | first step built: `race_planner_ros`, one node around the live planner's process (L1 + L2), on Autoware 2.1.0's seams (`/planning/trajectory`, the trajectory follower's command into the gate). Driven in Isaac through Autoware with FastSlowRR's F1 car (its roadmap 003 R5), in lockstep; no full lap yet. The Mustang still drives through scensim's Isaac course runner, without Autoware |
 | `drift_controller`: a drift law inside stock Autoware (the first approach) | built; a full Town05 ring lap with Autoware and a held drift. It showed why a race stack was needed |
 
 Known limitations, each with its cause: [docs/issues/](docs/issues/).
@@ -105,6 +105,7 @@ Known limitations, each with its cause: [docs/issues/](docs/issues/).
 
 | path | what |
 |---|---|
+| `src/planning/race_planner_ros` | the planner as an Autoware node: a wrapper around `serve.py` (Autoware's odometry in; its trajectory and the follower's control command out; holds until autonomous, then a launch to a rolling start) |
 | `src/planning/race_planner` | the planner and tracker (pure Python: CasADi, IPOPT, HPIPM). Key modules: `window.py` (L1's problem), `multistart.py` and `schedule.py` (starts and gate), `tracker.py` (L2), `live.py` (the driver loop), `surface.py` (surface map, friction estimate), `style.py` (driving styles), `serve.py` (a JSON-lines process a simulator drives), `sim.py` (the test plant). Studies in `studies/`, tests in `test/` |
 | `src/control/drift_controller` | the first approach: a drift state machine (`law.py`) and a ROS node between Autoware's command gate and the vehicle |
 | `src/launcher/drift_launch` | that approach's launch, Autoware parameter overrides (gate, smoother, diagnostic graph) and the Town05 ring scenario |

@@ -160,6 +160,12 @@ class Driver:
     # with a schedule, refused by name without). Changed live by
     # set_style, applied at the next re-plan outside a committed drift (style_due)
     style: object = None
+    # a failed warm re-solve (one start) tried again at once from the cold guess, in a cold
+    # window of up to this many iterations (under the same budget), its wall time added; 0, off,
+    # the default: the planner as before, bit for bit. FastSlowRR 003 R5: the F1 car at 75 m/s
+    # into Monza's first chicane, the plan shifted 33 nodes as a warm start: 400 iterations
+    # unsolved three times in a row; the same windows from the cold guess solved in 285 to 780
+    cold_retry: int = 0
     log: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -198,6 +204,8 @@ class Driver:
         self.free_stages = FREE_STAGES
         slips = {"front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
                  "rear_slip_low": self.rear_slip_low, "free_stages": self.free_stages}
+        self.slips = slips
+        self.retry = None              # the cold_retry window, built on its first use
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
                            beta_max=self.beta_max, **slips)
         self.warm = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
@@ -509,6 +517,21 @@ class Driver:
             new = self.warm.solve(self.track, i0, x0, self.v_end(i0), Xw, Uw, mu_scale=mu)
             self.cut = cut_iterate(new) if self.cut_warms(i0) else None
             wall = new["solve_s"]
+            if not new["ok"] and self.cold_retry:
+                if self.retry is None:
+                    self.retry = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
+                                       warm=False, max_iter=int(self.cold_retry),
+                                       budget=self.budget, beta_max=self.beta_max, **self.slips)
+                Xc, Uc = initial(self.retry.section(self.track, i0), self.car, v_start=x0[0])
+                Xc[:, 0] = x0
+                retry = self.retry.solve(self.track, i0, x0, self.v_end(i0), Xc, Uc, mu_scale=mu)
+                if retry["ok"]:     # the warm solver goes on from it, its multipliers with it
+                    self.warm.lam, self.warm.lam_x = self.retry.lam, self.retry.lam_x
+                wall += retry["solve_s"]
+                retry["iters"] = new["iters"] + retry["iters"]
+                retry["status"] = "cold_retry:" + retry["status"]
+                new = retry
+                self.cut = cut_iterate(new) if self.cut_warms(i0) else None
         else:                            # every seed at once; the wall time is the slowest's
             new, wall = self.multi.replan(self, i0, x0, self.v_end(i0), mu)
         self.solves.append({"t": state["t"], "s": state["s"], "ok": new["ok"],

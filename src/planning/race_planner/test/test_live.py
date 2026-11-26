@@ -203,3 +203,61 @@ def test_a_cut_solve_warms_the_next_unless_its_window_meets_ice():
     assert d.cut_warms(0) and d.cut_warms(near - 2)
     assert not d.cut_warms(near) and not d.cut_warms(d.node(950.0))
     d.close()
+
+
+def test_cold_retry_replaces_a_failed_warm_solve():
+    """cold_retry (FastSlowRR 003 R5): a warm re-solve that fails is solved again from the cold
+    guess in a window of its own, and the car drives on its plan, not into the stop."""
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0, 700.0, ds=4.0, w=5.0)
+    plant = Plant(c, SPEC, road(lambda s: 0.0, 700.0, ds=1.0, w=5.0))
+    plant.reset(s=20.0, speed=10.0)
+    d = Driver(c, tr, Tracker(c, tr), cold_retry=400)
+    st = plant.state()
+    d.start(st)
+    d.warm = _Failing(d.warm)
+    while st["t"] < 6.0:
+        cmd = d.step(st)
+        st = plant.step(cmd["accel"], cmd["tire_angle"], dt=0.02)
+    retried = [x for x in d.solves[1:] if x["status"].startswith("cold_retry:")]
+    assert retried and all(x["ok"] for x in retried), d.solves
+    assert d.stopping is None and d.fails == 0
+
+
+def test_serve_takes_a_track_file_the_rear_axle_and_answers_the_plan_in_the_map_frame(tmp_path):
+    """serve's opt-in keys (FastSlowRR 003 R5): the track from arrays, the pose Autoware's
+    base_link (the rear axle, moved to the CoM by lr), no clock (det), and the plan's line in
+    the map frame (plan_xy) starting where the car's CoM is."""
+    import dataclasses
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0, 600.0, ds=2.0, w=5.0)
+    arrays = {f.name: getattr(tr, f.name) for f in dataclasses.fields(tr)
+              if getattr(tr, f.name) is not None}
+    np.savez(tmp_path / "track.npz", **arrays)
+    init = {"spec": SPEC, "track_npz": str(tmp_path / "track.npz"), "ds": 4.0,
+            "pose": "rear_axle", "det": True, "plan_xy": True, "cold_retry": 400}
+    p = subprocess.Popen([sys.executable, "-m", "race_planner.serve"], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        p.stdin.write(json.dumps({"init": init}) + "\n")
+        p.stdin.flush()
+        assert json.loads(p.stdout.readline())["ready"]
+        i = 10
+        ps = float(tr.psi[i])
+        cx, cy = float(tr.x[i]), float(tr.y[i])                 # the CoM on the line
+        state = {"t": 0.0, "x": cx - c.lr * math.cos(ps), "y": cy - c.lr * math.sin(ps),
+                 "yaw": ps, "vx": 10.0, "vy": 0.0, "r": 0.0, "delta": 0.0}
+        p.stdin.write(json.dumps({"state": state}) + "\n")
+        p.stdin.flush()
+        out = json.loads(p.stdout.readline())
+        assert out["s"] == pytest.approx(float(tr.s[i]), abs=0.5)
+        assert abs(out["n"]) < 0.05
+        plan = out["plan"]
+        assert len(plan["x"]) == len(plan["s"]) == len(plan["t"]) == len(plan["psi"])
+        assert math.hypot(plan["x"][0] - cx, plan["y"][0] - cy) < 0.5
+        assert plan["psi"][0] == pytest.approx(ps, abs=0.05)
+        p.stdin.write(json.dumps({"stop": True}) + "\n")
+        p.stdin.flush()
+        assert json.loads(p.stdout.readline())["done"]
+    finally:
+        p.kill()
