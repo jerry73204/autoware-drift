@@ -154,6 +154,14 @@ class Driver:
     # multiples (window.slip_rows' k_rear_low; None: free): at its peak. Roadmap 061 M4b, issue
     # 003: the plans ran ice's rear on its falling branch, a slide the car cannot be held on
     rear_slip_low: float = 1.0
+    # front_slip_max and rear_slip_max on every surface (window.slip_rows' everywhere), not only
+    # on one without fall-off past the peak: a car held to grip driving (FastSlowRR 003 R5, the
+    # F1 car). Off by default: the planner as before, bit for bit
+    slip_everywhere: bool = False
+    # the stop's deceleration (L2's safety layer), m/s^2; None: STOP_DECEL. A car that brakes
+    # far harder than the Mustang stops in its own distance (FastSlowRR 003 R5: -6 from 70 m/s
+    # took the F1 car off the road at Monza's first chicane)
+    stop_decel: float = None
     # the driving style (roadmap 065; style.Style, a dict as Style.from_dict reads it, a YAML
     # path, or None: fastest, S1, today's planner bit for bit). Validated here, refused by name;
     # a style the planner cannot run yet is refused (NotImplementedError; S2 needs multistart
@@ -192,7 +200,7 @@ class Driver:
             # two windows long (a warm start's cold tail starts up to 0.8 of a window on and
             # runs a whole one: one window crashed Isaac's run at the finish)
             self.track = self.track.extended(2 * self.length + 4 * self.ds)
-        if not np.any(np.asarray(self.track.sliding) >= FLAT):
+        if not self.slip_everywhere and not np.any(np.asarray(self.track.sliding) >= FLAT):
             self.front_slip_max = self.rear_slip_max = None
         # the ECU's regen hold in the model only where a road is slick enough for it (issue 009)
         self.car = axle.regen_hold_car(self.car, self.grip * np.asarray(self.track.mu),
@@ -204,6 +212,8 @@ class Driver:
         self.free_stages = FREE_STAGES
         slips = {"front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
                  "rear_slip_low": self.rear_slip_low, "free_stages": self.free_stages}
+        if self.slip_everywhere:
+            slips["slip_everywhere"] = True
         self.slips = slips
         self.retry = None              # the cold_retry window, built on its first use
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
@@ -372,6 +382,8 @@ class Driver:
               "max_iter": FIRST_MAX_ITER, "beta_max": self.beta_max,
               "front_slip_max": self.front_slip_max, "rear_slip_max": self.rear_slip_max,
               "rear_slip_low": self.rear_slip_low, "free_stages": FREE_STAGES}
+        if self.slip_everywhere:
+            kw["slip_everywhere"] = True
 
         def go(name, w, Xs, Us):
             Xs = np.array(Xs, float)
@@ -451,6 +463,10 @@ class Driver:
                                      sliding=excess >= MU_BETA or abs(beta) >= SLIDE_BETA,
                                      s=state["s"], mu_map=mu_map)
 
+    @property
+    def stop_accel(self):
+        return STOP_DECEL if self.stop_decel is None else -abs(float(self.stop_decel))
+
     def plan_left(self, state):
         """How far the current plan reaches ahead of the car, m."""
         return float(self.plan["s"][-1] - state["s"])
@@ -459,7 +475,7 @@ class Driver:
         """The distance a stop from the plan's end speed takes at STOP_DECEL, and END_MARGIN: the
         plan has to reach at least this far ahead for the car to keep following it."""
         v = math.hypot(self.plan["X"][0, -1], self.plan["X"][1, -1])
-        return v * v / (2 * abs(STOP_DECEL)) + END_MARGIN
+        return v * v / (2 * abs(self.stop_accel)) + END_MARGIN
 
     def pending_mu(self):
         return self.pending[2] if self.pending is not None else 1.0
@@ -614,7 +630,7 @@ class Driver:
         else:
             steer = 0.0
         steer = max(-self.car.steer_max, min(self.car.steer_max, steer))
-        return {"accel": STOP_DECEL, "tire_angle": steer, "ok": False, "solve_s": 0.0,
+        return {"accel": self.stop_accel, "tire_angle": steer, "ok": False, "solve_s": 0.0,
                 "fallback": True, "stop": self.stopping}
 
 

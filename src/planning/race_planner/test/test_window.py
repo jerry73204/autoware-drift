@@ -327,3 +327,38 @@ def test_the_front_slip_bound_holds_on_packed_snow_but_not_on_ice_or_asphalt():
     assert row(0.2, 0.8) == pytest.approx(row(0.25, 1.0))     # as loose snow (flat), as before
     assert row(0.265, 0.7) < 0.01                                     # ice: free, as before
     assert row(1.12, 0.8) < 0.01                                      # asphalt: free, as before
+
+
+def test_slip_everywhere_binds_both_axles_on_asphalt_that_falls_off():
+    """slip_everywhere (FastSlowRR 003 R5): the front and rear rows bind on every surface, the
+    F1 car's asphalt (sliding 0.8) included, where they are otherwise free; a flat surface's
+    bound is the same either way."""
+    from race_planner.window import NP, NU, node_functions, slip_rows
+    c = car()
+    _, g, _, _, _ = node_functions(c, tyres=True)
+    x = [12.0, -2.0, 0.5, 0.0, 0.0, math.radians(20.0)]     # both axles well past their peaks
+    u = [0.0] * NU
+
+    def rows(sliding, everywhere):
+        gs = slip_rows(c, g, 1.0, 1.0, None, 0.0, everywhere=everywhere)
+        p = [0.0, 0.92 * 1.12, 0.0, sliding, 1.0, 1.0, 1.0, 1.0]
+        assert len(p) == NP
+        return np.abs(np.asarray(gs(x, u, p)).ravel()[-2:])
+
+    assert np.all(rows(0.8, False) < 0.01)                    # asphalt: free, as before
+    assert np.all(rows(0.8, True) > 1.0)                      # bound everywhere
+    assert np.allclose(rows(1.0, True), rows(1.0, False))     # a flat road: as before
+
+
+def test_the_stop_decelerates_at_the_cars_own_rate():
+    """stop_decel (FastSlowRR 003 R5): the safety stop brakes at the given rate and its distance
+    follows; None keeps STOP_DECEL."""
+    from race_planner.live import STOP_DECEL, Driver
+    from race_planner.tracker import Tracker
+    from test_ocp import road
+    c = car()
+    tr = road(lambda s: 0.0, 700.0, ds=4.0, w=5.0)
+    d = Driver(c, tr, Tracker(c, tr))
+    assert d.stop_accel == STOP_DECEL
+    d20 = Driver(c, tr, Tracker(c, tr), stop_decel=20.0)
+    assert d20.stop_accel == -20.0

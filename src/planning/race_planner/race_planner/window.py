@@ -210,7 +210,7 @@ SLIDING_LOW = 0.75   # this low (ice's 0.7; packed snow's 0.8 is not): rear_slip
 FREE_STAGES = 3   # the live loop's first stages free of the slip and held rows (12 m at ds 4)
 
 
-def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
+def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0, everywhere=False):
     """g(x, u, p) with a row per bounded axle: its slip angle (tan, as model.tyre takes it; the
     front at the bicycle's steering) over k times the surface's lateral peak (model.peaks, the
     surface's share p[7]), within [-1, 1]; only on a surface without fall-off past its peak
@@ -225,11 +225,16 @@ def slip_rows(car, g, k_front, k_rear=None, k_rear_low=None, mu_low=0.0):
     fall-off kept 0.8 of the peak force, enough for the plan to brake with the front at eight
     of its peaks (40 deg of steering on the chain's hairpin approach), where the steering no
     longer moves the car. Not on ice: its front is the plan's only brake besides the rear's
-    regen (M4f, issue 009), and not on the grippy roads (asphalt), where nothing asked it."""
+    regen (M4f, issue 009), and not on the grippy roads (asphalt), where nothing asked it.
+
+    everywhere: k_front and k_rear bind on every surface, as on a flat one (FastSlowRR 003 R5:
+    the F1 car on asphalt that falls off, 0.8 past the peak; its free plans slid 6 deg through
+    Monza's first chicane and 29 deg through Spa's La Source at low speed, slides its tracker
+    did not hold)."""
     x, u, p = ca.SX.sym("x", 6), ca.SX.sym("u", NU), ca.SX.sym("p", NP)
     vx, vy, r, delta = x[0], x[1], x[2], x[5]
     tp = model.peaks(car)[1] * p[7]
-    flat = p[3] >= FLAT
+    flat = ca.SX(1) if everywhere else p[3] >= FLAT
     rows = [g(x, u, p)]
     if k_front is not None:
         uy = vy + car.lf * r
@@ -416,7 +421,7 @@ class Window:
     def __init__(self, car, ds=4.0, length=200.0, grip=0.92, margin=0.3, max_iter=400,
                  tol=1e-3, budget=None, warm=True, compile=True, ipopt=None, beta_max=None,
                  rear_alpha_max=None, front_slip_max=None, rear_slip_max=None,
-                 rear_slip_low=None, free_stages=0, kappa_by_peak=True):
+                 rear_slip_low=None, free_stages=0, kappa_by_peak=True, slip_everywhere=False):
         """beta_max: the body's sideslip, |atan(vy / vx)|, at most this (rad) at every node, the
         last one's END_SLIP with it; rear_alpha_max: the rear axle's slip angle, |atan((vy - lr
         r) / vx)|, at most this. None (the live planner's) leaves either free. Each is two linear
@@ -431,6 +436,7 @@ class Window:
         the tyre is saturated and on such a surface its force does not say so, the steering no
         longer turns the car (roadmap 061 M4b, docs/issues/002); None leaves it free.
         rear_slip_low: the rear's bound on a slippery surface that falls off (issue 003).
+        slip_everywhere: front_slip_max and rear_slip_max bind on every surface (slip_rows).
         free_stages: the first stages free of these rows and the held rows (the live loop's
         FREE_STAGES: a window starts at the car's state, which may be past a bound); 0, every
         stage bound (a study's)."""
@@ -451,7 +457,7 @@ class Window:
                                               rear_slip_low is not None)
         if nk:
             self.g = slip_rows(car, self.g, front_slip_max, rear_slip_max, rear_slip_low,
-                               grip * MU_LOW)
+                               grip * MU_LOW, everywhere=slip_everywhere)
             lbg, ubg = list(lbg) + [-1.0] * nk, list(ubg) + [1.0] * nk
         # a hold car (axle.regen_hold_car) brakes its rear within what it carries sliding on a
         # held road's first metres (issue 013): one parameter more a stage, the gain

@@ -32,6 +32,10 @@ Opt-in init keys (FastSlowRR 003 R5: the planner behind a ROS node, race_planner
   "cold_retry": live.Driver's (iterations; 0 off)
   "beta_max_deg": live.Driver's beta_max, in degrees (the body's sideslip bound in every L1
       window; null: free)
+  "slips": {"everywhere": bool, "front": k, "rear": k}: live.Driver's slip_everywhere,
+      front_slip_max and rear_slip_max (the axles' slip angles within k of the peak)
+  "stop_decel": live.Driver's (m/s^2; null: STOP_DECEL)
+  "tracker_cold_retry": true: tracker.Tracker's cold_retry
   "plan_xy": true: a new plan's message carries its line in the map frame too: "x", "y",
       "psi" (heading of the line's tangent) and "t" (s) at its nodes
 A style change at any time: {"style": {...}} (as init's), validated as at init and applied at
@@ -194,7 +198,19 @@ def main():
     ms = init.get("multistart")
     if ms is not None and lap is not None and style.name == "drift_budget":
         ms = dict(ms, lap=lap)        # S2's budget a lap (roadmap 065 call 3)
-    driver = live.Driver(plan_car, track, Tracker(car, track), l0=l0,
+    slips = init.get("slips") or {}
+    extra = {}
+    if slips.get("everywhere"):
+        extra["slip_everywhere"] = True
+    if slips.get("front") is not None:
+        extra["front_slip_max"] = float(slips["front"])
+    if slips.get("rear") is not None:
+        extra["rear_slip_max"] = float(slips["rear"])
+    if init.get("stop_decel") is not None:
+        extra["stop_decel"] = float(init["stop_decel"])
+    driver = live.Driver(plan_car, track,
+                         Tracker(car, track, cold_retry=bool(init.get("tracker_cold_retry"))),
+                         l0=l0, **extra,
                          ds=float(init.get("ds", 4.0)), length=float(init.get("length", 200.0)),
                          grip=float(init.get("grip", 0.92)), budget=float(init.get("budget", 1.0)),
                          use_estimate=bool(init.get("friction_estimate", False)),

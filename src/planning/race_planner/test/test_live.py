@@ -261,3 +261,29 @@ def test_serve_takes_a_track_file_the_rear_axle_and_answers_the_plan_in_the_map_
         assert json.loads(p.stdout.readline())["done"]
     finally:
         p.kill()
+
+
+def test_tracker_cold_retry_solves_again_from_the_plan_before_the_lqr():
+    """Tracker(cold_retry=True) (FastSlowRR 003 R5): a QP from the last solution that fails is
+    solved again from the plan's guess in the same tick; without it, that tick is the LQR's."""
+    c = Car.from_spec(SPEC)
+    tr = road(lambda s: 0.0, 700.0, ds=4.0, w=5.0)
+    plant = Plant(c, SPEC, road(lambda s: 0.0, 700.0, ds=1.0, w=5.0))
+    plant.reset(s=20.0, speed=10.0)
+    d = Driver(c, tr, Tracker(c, tr))
+    st = plant.state()
+    d.start(st)
+    outs = {}
+    for retry in (False, True):
+        t = Tracker(c, tr, cold_retry=retry, budget=1e9)
+        real = t._solve
+
+        def warm_fails(x0, state, t=t, real=real):
+            w, dw, p, ok = real(x0, state)
+            return w, dw, p, ok and t.W is None          # every QP from a last solution fails
+
+        t._solve = warm_fails
+        t.step(st, d.plan, 0.0)                           # cold: solves
+        outs[retry] = t.step(st, d.plan, 0.0)             # warm: fails, then?
+    assert outs[False]["fallback"] and not outs[False]["ok"]
+    assert not outs[True]["fallback"] and outs[True]["ok"]

@@ -300,8 +300,13 @@ class Tracker:
     over the tick at the first stage's rate; accel the first stage's request."""
 
     def __init__(self, car, track, horizon=1.0, dt=0.04, tick=0.02, grip=1.0, budget=BUDGET,
-                 qpsol="hpipm"):
+                 qpsol="hpipm", cold_retry=False):
         car = axle.regen_hold_car(car, grip * np.asarray(track.mu), track.sliding)   # 009
+        # cold_retry: a failed QP from the last solution is solved again at once from the plan's
+        # own guess, in the same tick, before the LQR takes it (FastSlowRR 003 R5: the F1 car's
+        # warm QPs failed every other tick at low speed, the tick after, from the plan, solved:
+        # the command alternated NMPC / LQR tick by tick, +15 / -0.6 m/s^2). Off by default
+        self.cold_retry = bool(cold_retry)
         self.car, self.track, self.dt, self.tick, self.budget = car, track, dt, tick, budget
         self.N = N = int(round(horizon / dt))
         self.rate = car.steer_rate_max or STEER_RATE
@@ -492,14 +497,9 @@ class Tracker:
         return X, Z[NX:NX + self.nu], Z[NX + self.nu:]
 
     # -- one tick ---------------------------------------------------------------------------
-    def step(self, state, plan, plan_t0=None):
-        c = time.perf_counter()
-        if self.plan is None or self.plan.src is not plan:
-            self.plan = _Plan(plan)
-        if self.delta is None:
-            self.delta = float(state["delta"])
-        x0 = np.array([state["s"], state["n"], state["xi"], state["vx"], state["vy"],
-                       state["r"], self.delta, self.a_prev])
+    def _solve(self, x0, state):
+        """One QP from the guess (the last solution, else the plan's): w, its step dw, the
+        parameters p and whether it solved."""
         X, U, acc = self._guess(x0, self.plan)
         p = self._params(X, acc, self.plan, state.get("mu_scale", 1.0))
         w = self._pack(X, U)
@@ -511,6 +511,21 @@ class Tracker:
                           lbx=lbw, ubx=ubw)
         dw = np.asarray(sol["x"]).ravel()
         ok = bool(self.solver.stats()["success"]) and np.all(np.isfinite(dw))
+        return w, dw, p, ok
+
+    def step(self, state, plan, plan_t0=None):
+        c = time.perf_counter()
+        if self.plan is None or self.plan.src is not plan:
+            self.plan = _Plan(plan)
+        if self.delta is None:
+            self.delta = float(state["delta"])
+        x0 = np.array([state["s"], state["n"], state["xi"], state["vx"], state["vy"],
+                       state["r"], self.delta, self.a_prev])
+        warm = self.W is not None
+        w, dw, p, ok = self._solve(x0, state)
+        if not ok and warm and self.cold_retry:
+            self.W = None                              # the plan's guess, at once
+            w, dw, p, ok = self._solve(x0, state)
         solve_s = time.perf_counter() - c
         if ok:
             Xn, Un, Sn = self._unpack(w + dw)
