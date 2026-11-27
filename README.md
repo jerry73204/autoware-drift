@@ -96,7 +96,7 @@ drift does to stock Autoware: [docs/autoware-in-a-drift.md](docs/autoware-in-a-d
 | Live planner and tracker (L1 + L2) | built; driven live in Isaac on Haruna's hairpins and Tsukuba, within 3.5 % of the whole-track plan, no contact |
 | Grip-or-drift choice (multi-start, surface schedule, friction estimate) | built; being measured across surfaces. Asphalt, gravel, mud and snow test corners finish; ice partly (about 10 of 12) |
 | Driving styles | `fastest` built; `drift_budget` in progress; `drift_max` designed |
-| Race nodes on Autoware's seams (diagram above) | first step built: `race_planner_ros`, one node around the live planner's process (L1 + L2), on Autoware 2.1.0's seams (`/planning/trajectory`, the trajectory follower's command into the gate). Driven in Isaac through Autoware with FastSlowRR's F1 car (its roadmap 003 R5), in lockstep; no full lap yet. The Mustang still drives through scensim's Isaac course runner, without Autoware |
+| Race nodes on Autoware's seams (diagram above) | first step built: `race_planner_ros`, one node around the live planner's process (L1 + L2), on Autoware 2.1.0's seams (`/planning/trajectory`, the trajectory follower's command into the gate). It laps Monza and Spa in Isaac through Autoware with FastSlowRR's F1 car (its roadmap 003 R5: 109.7 s and 147.0 s, lockstep, grip driving; no time work yet). The Mustang still drives through scensim's Isaac course runner, without Autoware |
 | `drift_controller`: a drift law inside stock Autoware (the first approach) | built; a full Town05 ring lap with Autoware and a held drift. It showed why a race stack was needed |
 
 Known limitations, each with its cause: [docs/issues/](docs/issues/).
