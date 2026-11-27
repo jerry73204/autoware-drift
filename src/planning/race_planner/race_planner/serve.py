@@ -248,6 +248,8 @@ def main():
               "xi": xi, "n_plan": last["n_plan"], "v_plan": last["v_plan"], "stop": last["stopping"],
               "beta_plan_deg": last["beta_plan_deg"],
               "solve_s": driver.solves[-1]["solve_s"] if driver.solves else 0.0,
+              "n_solves": len(driver.solves),
+              "solve_status": driver.solves[-1]["status"] if driver.solves else None,
               **plan_message(driver, ids, driver.track if with_xy else None)})
     driver.close()
     summary = {"solves": len(driver.solves), "solves_ok": sum(x["ok"] for x in driver.solves),

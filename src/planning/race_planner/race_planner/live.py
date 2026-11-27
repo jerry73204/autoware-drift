@@ -216,6 +216,7 @@ class Driver:
             slips["slip_everywhere"] = True
         self.slips = slips
         self.retry = None              # the cold_retry window, built on its first use
+        self.retry_free = None         # and its window with the slip bounds off
         self.cold = Window(self.car, ds=self.ds, length=self.length, grip=self.grip, warm=False,
                            beta_max=self.beta_max, **slips)
         self.warm = Window(self.car, ds=self.ds, length=self.length, grip=self.grip,
@@ -543,6 +544,23 @@ class Driver:
                 retry = self.retry.solve(self.track, i0, x0, self.v_end(i0), Xc, Uc, mu_scale=mu)
                 if retry["ok"]:     # the warm solver goes on from it, its multipliers with it
                     self.warm.lam, self.warm.lam_x = self.retry.lam, self.retry.lam_x
+                elif any(self.slips[k] is not None
+                         for k in ("front_slip_max", "rear_slip_max", "rear_slip_low")):
+                    # last, as the first plan's rescue: the slip bounds off (a car past a bound
+                    # when its window starts, beyond the free stages, leaves the bounded window
+                    # infeasible: FastSlowRR 003 R5, Spa's Bus Stop, three failed in a row and
+                    # the stop); the next re-plans bring the plan back within them
+                    if self.retry_free is None:
+                        kw = {k: v for k, v in self.slips.items()
+                              if k not in ("front_slip_max", "rear_slip_max", "rear_slip_low")}
+                        self.retry_free = Window(self.car, ds=self.ds, length=self.length,
+                                                 grip=self.grip, warm=False,
+                                                 max_iter=int(self.cold_retry),
+                                                 budget=self.budget, beta_max=self.beta_max, **kw)
+                    wall += retry["solve_s"]
+                    retry = self.retry_free.solve(self.track, i0, x0, self.v_end(i0), Xc, Uc,
+                                                  mu_scale=mu)
+                    retry["status"] = "free:" + retry["status"]
                 wall += retry["solve_s"]
                 retry["iters"] = new["iters"] + retry["iters"]
                 retry["status"] = "cold_retry:" + retry["status"]
